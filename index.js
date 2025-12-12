@@ -55,17 +55,20 @@ function layout({ title, body }) {
   <title>${escapeHtml(title)}</title>
   <style>
     :root{
-      --bg:#0a0f18;
-      --card:#101a2b;
-      --card2:#0c1422;
-      --line:#26344f;
+      --bg:#070b14;
+      --card:#0e1a2f;
+      --card2:#0a1426;
+      --line:#233455;
       --text:#eef2ff;
-      --muted:#b2bdd8;
-      --accent:#f59e0b;       /* freight orange */
-      --accent2:#60a5fa;      /* steel blue */
-      --good:#22c55e;
-      --warn:#fbbf24;
-      --shadow: 0 18px 50px rgba(0,0,0,.35);
+      --muted:#b7c2dd;
+
+      /* Brand: Blue + Orange */
+      --blue:#60a5fa;
+      --blue2:#2563eb;
+      --orange:#f59e0b;
+      --orange2:#fb923c;
+
+      --shadow: 0 18px 50px rgba(0,0,0,.38);
     }
     *{box-sizing:border-box}
     body{
@@ -73,27 +76,27 @@ function layout({ title, body }) {
       color:var(--text);
       font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
       background:
-        linear-gradient(180deg, rgba(96,165,250,.10), transparent 55%),
-        radial-gradient(1000px 600px at 18% -10%, rgba(245,158,11,.18), transparent 55%),
-        radial-gradient(1000px 600px at 92% 0%, rgba(96,165,250,.16), transparent 55%),
+        radial-gradient(900px 520px at 15% -10%, rgba(245,158,11,.22), transparent 55%),
+        radial-gradient(900px 520px at 90% 0%, rgba(96,165,250,.22), transparent 55%),
+        linear-gradient(180deg, rgba(37,99,235,.12), transparent 45%),
         var(--bg);
     }
-    a{color:var(--accent2); text-decoration:none}
+    a{color:var(--blue); text-decoration:none}
     a:hover{text-decoration:underline}
-    .wrap{max-width:1100px; margin:0 auto; padding:22px}
+    .wrap{max-width:1120px; margin:0 auto; padding:22px}
     .nav{
       display:flex; align-items:center; justify-content:space-between; gap:14px;
       padding:14px 16px;
       border:1px solid var(--line);
       border-radius:18px;
-      background:rgba(16,26,43,.72);
-      backdrop-filter: blur(8px);
+      background:rgba(14,26,47,.72);
+      backdrop-filter: blur(10px);
       position:sticky; top:14px; z-index:20;
       box-shadow: var(--shadow);
     }
     .brand{display:flex; align-items:center; gap:12px}
     .mark{
-      width:42px;height:42px;border-radius:14px;
+      width:44px;height:44px;border-radius:14px;
       border:1px solid rgba(255,255,255,.10);
       background: linear-gradient(135deg, rgba(245,158,11,.95), rgba(96,165,250,.95));
       display:grid; place-items:center;
@@ -105,7 +108,7 @@ function layout({ title, body }) {
     .pill{
       padding:7px 10px;border-radius:999px;
       border:1px solid var(--line);
-      background:rgba(12,20,34,.80);
+      background:rgba(10,20,38,.80);
       color:var(--muted);
       font-size:12px;
       display:inline-flex; gap:8px; align-items:center;
@@ -114,7 +117,7 @@ function layout({ title, body }) {
       display:inline-flex;align-items:center;justify-content:center;gap:8px;
       padding:10px 14px;border-radius:12px;
       border:1px solid var(--line);
-      background:rgba(12,20,34,.85);
+      background:rgba(10,20,38,.85);
       color:var(--text);
       cursor:pointer;
       transition: transform .08s ease, border-color .12s ease;
@@ -123,31 +126,41 @@ function layout({ title, body }) {
     .btn:active{transform: translateY(1px)}
     .btn.primary{
       border:none;
-      background: linear-gradient(135deg, rgba(245,158,11,.98), rgba(245,158,11,.78));
+      background: linear-gradient(135deg, rgba(245,158,11,.98), rgba(251,146,60,.82));
       color:#111827;
       box-shadow: 0 18px 55px rgba(245,158,11,.18);
-      font-weight:700;
+      font-weight:800;
+    }
+    .btn.blue{
+      border:none;
+      background: linear-gradient(135deg, rgba(37,99,235,.98), rgba(96,165,250,.85));
+      color:#0b1020;
+      box-shadow: 0 18px 55px rgba(96,165,250,.14);
+      font-weight:800;
     }
     .grid{display:grid;gap:16px;grid-template-columns:1.35fr .65fr;margin-top:16px}
     @media (max-width:900px){ .grid{grid-template-columns:1fr} .nav{position:static} }
     .card{
       border:1px solid var(--line);
       border-radius:18px;
-      background:rgba(16,26,43,.72);
-      backdrop-filter: blur(8px);
+      background:rgba(14,26,47,.72);
+      backdrop-filter: blur(10px);
       padding:18px;
       box-shadow: var(--shadow);
     }
-    .card.soft{background:rgba(12,20,34,.76)}
-    .heroTitle{font-size:38px;line-height:1.05;margin:0 0 10px 0;letter-spacing:-.3px}
+    .card.soft{background:rgba(10,20,38,.76)}
+    .heroTitle{
+      font-size:40px; line-height:1.05; margin:0 0 10px 0;
+      letter-spacing:-.35px;
+    }
     .muted{color:var(--muted)}
-    .hr{height:1px;background:rgba(38,52,79,.8);margin:14px 0;border:0}
+    .hr{height:1px;background:rgba(35,52,85,.9);margin:14px 0;border:0}
     .kpis{display:flex; gap:10px; flex-wrap:wrap; margin-top:12px}
     .kpi{
       padding:10px 12px; border-radius:14px;
       border:1px solid var(--line);
-      background:rgba(12,20,34,.85);
-      font-size:12px; min-width: 140px;
+      background:rgba(10,20,38,.85);
+      font-size:12px; min-width: 150px;
     }
     .kpi b{display:block;font-size:14px;color:var(--text)}
     .two{display:grid; gap:12px; grid-template-columns:1fr 1fr}
@@ -155,21 +168,26 @@ function layout({ title, body }) {
     .roleCard{
       padding:14px;border-radius:16px;
       border:1px solid rgba(255,255,255,.08);
-      background: linear-gradient(180deg, rgba(12,20,34,.75), rgba(12,20,34,.55));
+      background: linear-gradient(180deg, rgba(10,20,38,.78), rgba(10,20,38,.58));
     }
     .roleTitle{display:flex;align-items:center;justify-content:space-between;gap:10px}
     .tag{
       font-size:12px; padding:6px 10px; border-radius:999px;
-      border:1px solid rgba(245,158,11,.25);
+      border:1px solid rgba(245,158,11,.30);
       background: rgba(245,158,11,.10);
       color: rgba(255,243,220,.95);
+    }
+    .tagBlue{
+      border:1px solid rgba(96,165,250,.30);
+      background: rgba(96,165,250,.10);
+      color: rgba(220,235,255,.95);
     }
     .tiny{font-size:12px}
     input,select{
       width:min(520px,100%);
       padding:12px 12px;border-radius:12px;
       border:1px solid var(--line);
-      background:rgba(12,20,34,.92);
+      background:rgba(10,20,38,.92);
       color:var(--text);
       outline:none;
     }
@@ -177,7 +195,14 @@ function layout({ title, body }) {
     .formGrid{display:grid;gap:10px;grid-template-columns:1fr 1fr}
     @media (max-width:700px){ .formGrid{grid-template-columns:1fr} }
     .footer{margin:22px 0 8px 0;color:var(--muted);font-size:12px}
+
     .icon{width:20px;height:20px;display:block}
+    .callouts{display:grid;gap:12px;margin-top:14px}
+    .callout{
+      padding:12px 12px;border-radius:16px;border:1px solid var(--line);
+      background:rgba(10,20,38,.75);
+    }
+    .check{color:var(--orange); font-weight:900}
   </style>
 </head>
 <body>
@@ -185,7 +210,6 @@ function layout({ title, body }) {
     <div class="nav">
       <div class="brand">
         <div class="mark" aria-hidden="true">
-          <!-- Simple truck icon -->
           <svg class="icon" viewBox="0 0 24 24" fill="none">
             <path d="M3 7h11v10H3V7Z" stroke="rgba(17,24,39,.9)" stroke-width="2"/>
             <path d="M14 10h4l3 3v4h-7v-7Z" stroke="rgba(17,24,39,.9)" stroke-width="2"/>
@@ -195,21 +219,21 @@ function layout({ title, body }) {
         </div>
         <div>
           <h1>Direct Freight Exchange</h1>
-          <div class="sub">Professional marketplace • Compliance-first • Built for U.S. freight</div>
+          <div class="sub">Direct shipper ↔ carrier connections • Transparent loads • Compliance-first</div>
         </div>
       </div>
       <div class="right">
-        <span class="pill">✅ Live</span>
+        <span class="pill">🟧🟦 Live</span>
         <a class="btn" href="/">Home</a>
         <a class="btn" href="/signup">Sign up</a>
-        <a class="btn primary" href="/login">Login</a>
+        <a class="btn blue" href="/login">Login</a>
       </div>
     </div>
 
     ${body}
 
     <div class="footer">
-      Next we’ll add: role dashboards → Stripe subscriptions (shippers) → carrier document uploads → admin review → compliance badge enforcement.
+      Next we’ll add: staying logged in + role dashboards → Stripe subscriptions (shippers) → carrier document uploads → admin review → compliance badge enforcement.
     </div>
   </div>
 </body>
@@ -220,15 +244,24 @@ app.get("/", (req, res) => {
   const body = `
     <div class="grid">
       <div class="card">
-        <h2 class="heroTitle">Book freight with verified carriers.</h2>
+        <h2 class="heroTitle">Connect shippers and truckers—directly.</h2>
         <div class="muted">
-          A clean, compliance-first exchange: shippers subscribe to post loads, carriers upload required U.S. documents, and admins approve before booking.
+          No hidden details. No “call for rate.” Post loads with full transparency so carriers can say <b>yes</b> faster—and move freight with confidence.
         </div>
 
         <div class="kpis">
-          <div class="kpi"><b>Compliance-ready</b><span class="muted">Insurance • Authority • W-9</span></div>
-          <div class="kpi"><b>Subscription-based</b><span class="muted">Stripe billing</span></div>
-          <div class="kpi"><b>Fast onboarding</b><span class="muted">Role dashboards</span></div>
+          <div class="kpi"><b>Direct connections</b><span class="muted">Shipper ↔ carrier chat/workflow next</span></div>
+          <div class="kpi"><b>Transparent loads</b><span class="muted">Rate • miles • weight • terms</span></div>
+          <div class="kpi"><b>Verified carriers</b><span class="muted">Insurance • authority • W-9</span></div>
+        </div>
+
+        <div class="callouts">
+          <div class="callout">
+            <div><span class="check">✓</span> Post loads with: <span class="muted">lane, pickup/delivery, equipment, weight, commodity, miles, rate, payment terms, detention/accessorials</span></div>
+          </div>
+          <div class="callout">
+            <div><span class="check">✓</span> Carriers earn a badge by uploading U.S. documents: <span class="muted">insurance + authority + W-9</span></div>
+          </div>
         </div>
 
         <div class="hr"></div>
@@ -236,25 +269,25 @@ app.get("/", (req, res) => {
         <div class="two">
           <div class="roleCard">
             <div class="roleTitle">
-              <b>For Shippers</b>
-              <span class="tag">Subscribe & post loads</span>
+              <b>Shippers</b>
+              <span class="tag">Subscribe • Post • Track</span>
             </div>
             <div class="muted tiny" style="margin-top:8px">
-              Post loads after subscription. Manage invoices/receipts. Build a carrier network.
+              Post transparent loads, get direct carrier interest, manage invoices/receipts.
             </div>
           </div>
           <div class="roleCard">
             <div class="roleTitle">
-              <b>For Carriers</b>
-              <span class="tag">Upload & get verified</span>
+              <b>Carriers</b>
+              <span class="tag tagBlue">Verify • Book • Get paid</span>
             </div>
             <div class="muted tiny" style="margin-top:8px">
-              Upload proof of insurance, proof of authority (MC/FF), and W-9. Earn a compliance badge.
+              See the details up front, verify compliance once, and book freight faster.
             </div>
           </div>
         </div>
 
-        <div class="row" style="margin-top:14px; display:flex; gap:10px; flex-wrap:wrap">
+        <div style="margin-top:14px; display:flex; gap:10px; flex-wrap:wrap">
           <a class="btn primary" href="/signup">Get started</a>
           <a class="btn" href="/login">Log in</a>
         </div>
@@ -263,14 +296,18 @@ app.get("/", (req, res) => {
       <div class="card soft">
         <h3 style="margin-top:0">What works today</h3>
         <ul class="muted" style="margin:10px 0 0 18px; padding:0">
-          <li>Clean homepage</li>
+          <li>Orange/blue brand homepage</li>
           <li>Signup stored in Postgres</li>
           <li>Role selection (Shipper/Carrier)</li>
         </ul>
         <div class="hr"></div>
-        <div class="muted tiny">
-          Next upgrade: keep users logged in (sessions/JWT) + role-based dashboards.
-        </div>
+        <h3 style="margin-top:0">What we add next</h3>
+        <ul class="muted" style="margin:10px 0 0 18px; padding:0">
+          <li>Stay logged in (sessions)</li>
+          <li>Role dashboards</li>
+          <li>Stripe subscription + receipts</li>
+          <li>Transparent load posting form</li>
+        </ul>
       </div>
     </div>
   `;
@@ -282,7 +319,7 @@ app.get("/signup", (req, res) => {
     <div class="grid">
       <div class="card">
         <h2 style="margin-top:0">Create your account</h2>
-        <div class="muted">Choose Shipper or Carrier. (Admin will be added later.)</div>
+        <div class="muted">Choose your role. (Admin will be added later.)</div>
 
         <form method="POST" action="/signup" style="margin-top:14px">
           <div class="formGrid">
@@ -297,17 +334,15 @@ app.get("/signup", (req, res) => {
         </form>
 
         <div class="tiny muted" style="margin-top:10px">
-          Carriers will upload documents next (insurance/authority/W-9). Shippers will subscribe next (Stripe).
+          Next: shippers subscribe to post loads. carriers upload compliance docs for verification.
         </div>
       </div>
 
       <div class="card soft">
-        <h3 style="margin-top:0">Required carrier docs (next)</h3>
-        <ul class="muted" style="margin:10px 0 0 18px; padding:0">
-          <li>Proof of Insurance (with expiry)</li>
-          <li>Proof of Authority (MC/FF)</li>
-          <li>W-9</li>
-        </ul>
+        <h3 style="margin-top:0">Transparency promise</h3>
+        <div class="muted tiny">
+          Loads will show <b>rate + terms</b> up front. No hidden accessorials. Clear pickup/delivery requirements.
+        </div>
       </div>
     </div>
   `;
@@ -348,7 +383,7 @@ app.get("/login", (req, res) => {
           <div class="formGrid">
             <input name="email" type="email" placeholder="Email" required />
             <input name="password" type="password" placeholder="Password" required />
-            <button class="btn primary" type="submit">Login</button>
+            <button class="btn blue" type="submit">Login</button>
             <a class="btn" href="/signup">Create account</a>
           </div>
         </form>
@@ -357,9 +392,9 @@ app.get("/login", (req, res) => {
       <div class="card soft">
         <h3 style="margin-top:0">After login (next)</h3>
         <ul class="muted" style="margin:10px 0 0 18px; padding:0">
-          <li>Role dashboard</li>
-          <li>Shipper subscription (Stripe)</li>
-          <li>Carrier compliance uploads</li>
+          <li>Shipper dashboard: subscribe + post transparent loads</li>
+          <li>Carrier dashboard: upload docs + get verified</li>
+          <li>Admin: approve docs + badge enforcement</li>
         </ul>
       </div>
     </div>
@@ -384,8 +419,8 @@ app.post("/login", async (req, res) => {
         <div class="card">
           <h2 style="margin-top:0">Login successful ✅</h2>
           <div class="muted">Role: <b>${escapeHtml(r.rows[0].role)}</b></div>
-          <div style="margin-top:12px" class="muted tiny">
-            Next: I’ll add real sessions so you stay logged in + dashboards for Shipper/Carrier/Admin.
+          <div class="muted tiny" style="margin-top:10px">
+            Next: I’ll add real sessions so you stay logged in + dashboards for transparent loads & compliance.
           </div>
           <div style="margin-top:14px; display:flex; gap:10px; flex-wrap:wrap">
             <a class="btn primary" href="/">Back to Home</a>
