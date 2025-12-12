@@ -13,28 +13,22 @@ const DATABASE_URL = process.env.DATABASE_URL;
 const JWT_SECRET = process.env.JWT_SECRET;
 
 if (!DATABASE_URL) {
-  app.get("*", (req, res) => res.send("<h1>Missing DATABASE_URL</h1>"));
+  app.get("*", (_, res) => res.send("<h1>Missing DATABASE_URL</h1>"));
   app.listen(PORT, "0.0.0.0");
   return;
 }
 if (!JWT_SECRET) {
-  app.get("*", (req, res) => res.send("<h1>Missing JWT_SECRET</h1><p>Add JWT_SECRET in Render → Environment.</p>"));
+  app.get("*", (_, res) => res.send("<h1>Missing JWT_SECRET</h1><p>Add JWT_SECRET in Render → Environment.</p>"));
   app.listen(PORT, "0.0.0.0");
   return;
 }
 
-const pool = new Pool({
-  connectionString: DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-});
+const pool = new Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
 function escapeHtml(s) {
   return String(s ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
+    .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;").replaceAll("'", "&#039;");
 }
 
 function money(n) {
@@ -43,89 +37,10 @@ function money(n) {
   return `$${x.toFixed(2)}`;
 }
 
-function layout(title, user, body) {
-  return `<!doctype html>
-<html>
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>${escapeHtml(title)}</title>
-<style>
-  :root{
-    --bg:#070b14; --card:#0e1a2f; --card2:#0a1426; --line:#233455;
-    --text:#eef2ff; --muted:#b7c2dd;
-    --blue:#60a5fa; --blue2:#2563eb; --orange:#f59e0b; --orange2:#fb923c;
-    --shadow: 0 18px 50px rgba(0,0,0,.38);
-  }
-  *{box-sizing:border-box}
-  body{margin:0;color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;
-    background:
-      radial-gradient(900px 520px at 15% -10%, rgba(245,158,11,.22), transparent 55%),
-      radial-gradient(900px 520px at 90% 0%, rgba(96,165,250,.22), transparent 55%),
-      var(--bg);
-  }
-  a{color:var(--blue);text-decoration:none}
-  a:hover{text-decoration:underline}
-  .wrap{max-width:1180px;margin:0 auto;padding:22px}
-  .nav{
-    display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;
-    padding:14px 16px;border:1px solid var(--line);border-radius:18px;
-    background:rgba(14,26,47,.72);backdrop-filter: blur(10px);box-shadow: var(--shadow);
-  }
-  .brand{display:flex;align-items:center;gap:12px}
-  .mark{width:44px;height:44px;border-radius:14px;border:1px solid rgba(255,255,255,.10);
-    background: linear-gradient(135deg, rgba(245,158,11,.95), rgba(96,165,250,.95));
-    display:grid;place-items:center;
-  }
-  .brand h1{font-size:16px;margin:0}
-  .sub{font-size:12px;color:var(--muted);margin-top:2px}
-  .right{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-  .pill{padding:7px 10px;border-radius:999px;border:1px solid var(--line);background:rgba(10,20,38,.80);color:var(--muted);font-size:12px}
-  .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:10px 14px;border-radius:12px;
-    border:1px solid var(--line);background:rgba(10,20,38,.85);color:var(--text);cursor:pointer}
-  .btn.primary{border:none;background: linear-gradient(135deg, rgba(245,158,11,.98), rgba(251,146,60,.82));color:#111827;font-weight:800}
-  .btn.blue{border:none;background: linear-gradient(135deg, rgba(37,99,235,.98), rgba(96,165,250,.85));color:#0b1020;font-weight:800}
-  .grid{display:grid;gap:16px;grid-template-columns:1.1fr .9fr;margin-top:16px}
-  @media (max-width:980px){.grid{grid-template-columns:1fr}}
-  .card{border:1px solid var(--line);border-radius:18px;background:rgba(14,26,47,.72);backdrop-filter: blur(10px);padding:18px;box-shadow: var(--shadow)}
-  .card.soft{background:rgba(10,20,38,.76)}
-  .muted{color:var(--muted)}
-  .hr{height:1px;background:rgba(35,52,85,.9);margin:14px 0;border:0}
-  input,select,textarea{
-    width:100%; padding:12px 12px;border-radius:12px;border:1px solid var(--line);
-    background:rgba(10,20,38,.92);color:var(--text);outline:none;
-  }
-  textarea{min-height:86px;resize:vertical}
-  .formGrid{display:grid;gap:10px;grid-template-columns:1fr 1fr}
-  @media (max-width:780px){.formGrid{grid-template-columns:1fr}}
-  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
-  .load{padding:14px;border-radius:16px;border:1px solid rgba(255,255,255,.08);background:rgba(10,20,38,.75);margin-top:10px}
-  .load h3{margin:0 0 8px 0}
-  .kv{display:grid;grid-template-columns:200px 1fr;gap:6px;max-width:900px}
-  @media (max-width:780px){.kv{grid-template-columns:1fr}}
-  .k{color:var(--muted)}
-</style>
-</head>
-<body>
-<div class="wrap">
-  <div class="nav">
-    <div class="brand">
-      <div class="mark" aria-hidden="true">🚚</div>
-      <div>
-        <h1>Direct Freight Exchange</h1>
-        <div class="sub">Orange + Blue • Direct shipper ↔ carrier • Fully transparent loads</div>
-      </div>
-    </div>
-    <div class="right">
-      <a class="btn" href="/">Home</a>
-      ${user ? `<span class="pill">${escapeHtml(user.role)}</span><span class="pill">${escapeHtml(user.email)}</span><a class="btn" href="/dashboard">Dashboard</a><a class="btn" href="/logout">Logout</a>`
-             : `<a class="btn" href="/signup">Sign up</a><a class="btn blue" href="/login">Login</a>`}
-    </div>
-  </div>
-  ${body}
-</div>
-</body>
-</html>`;
+function int(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return 0;
+  return Math.trunc(x);
 }
 
 function signIn(res, user) {
@@ -150,6 +65,208 @@ function requireAuth(req, res, next) {
   next();
 }
 
+function layout({ title, user, body }) {
+  const rolePill = user ? `<span class="pill"><span class="dot"></span>${escapeHtml(user.role)}</span>` : "";
+  const userPill = user ? `<span class="pill mono">${escapeHtml(user.email)}</span>` : "";
+
+  return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>${escapeHtml(title)}</title>
+<style>
+  :root{
+    --bg:#070b14;
+    --panel:#0b1426;
+    --card:#0f1b33;
+    --line:#233455;
+    --text:#eef2ff;
+    --muted:#b7c2dd;
+
+    --blue:#60a5fa;
+    --blue2:#2563eb;
+    --orange:#f59e0b;
+    --orange2:#fb923c;
+
+    --ok:#22c55e;
+    --warn:#fbbf24;
+
+    --shadow: 0 18px 60px rgba(0,0,0,.40);
+    --radius: 18px;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;
+    color:var(--text);
+    font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
+    background:
+      radial-gradient(950px 520px at 14% -8%, rgba(245,158,11,.24), transparent 55%),
+      radial-gradient(950px 520px at 92% 0%, rgba(96,165,250,.24), transparent 55%),
+      linear-gradient(180deg, rgba(37,99,235,.10), transparent 45%),
+      var(--bg);
+  }
+  a{color:var(--blue);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:1200px;margin:0 auto;padding:22px}
+
+  .nav{
+    display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;
+    padding:14px 16px;border:1px solid var(--line);border-radius:20px;
+    background:rgba(15,27,51,.72);backdrop-filter: blur(10px);
+    box-shadow: var(--shadow);
+    position:sticky;top:14px;z-index:20;
+  }
+  .brand{display:flex;align-items:center;gap:12px}
+  .mark{
+    width:46px;height:46px;border-radius:16px;
+    border:1px solid rgba(255,255,255,.10);
+    background: linear-gradient(135deg, rgba(245,158,11,.95), rgba(96,165,250,.95));
+    display:grid;place-items:center;
+  }
+  .brand h1{font-size:16px;margin:0;letter-spacing:.2px}
+  .sub{font-size:12px;color:var(--muted);margin-top:2px}
+  .right{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .pill{
+    padding:7px 10px;border-radius:999px;border:1px solid var(--line);
+    background:rgba(11,20,38,.85);
+    color:var(--muted);font-size:12px;display:inline-flex;gap:8px;align-items:center;
+  }
+  .dot{width:8px;height:8px;border-radius:999px;background:linear-gradient(135deg,var(--orange),var(--blue))}
+  .mono{font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;}
+  .btn{
+    display:inline-flex;align-items:center;justify-content:center;gap:8px;
+    padding:10px 14px;border-radius:12px;border:1px solid var(--line);
+    background:rgba(11,20,38,.86);color:var(--text);cursor:pointer;
+    transition: transform .08s ease, filter .12s ease;
+  }
+  .btn:hover{filter:brightness(1.06)}
+  .btn:active{transform:translateY(1px)}
+  .btn.orange{
+    border:none;
+    background: linear-gradient(135deg, rgba(245,158,11,.98), rgba(251,146,60,.82));
+    color:#111827;font-weight:900;
+    box-shadow: 0 18px 55px rgba(245,158,11,.18);
+  }
+  .btn.blue{
+    border:none;
+    background: linear-gradient(135deg, rgba(37,99,235,.98), rgba(96,165,250,.85));
+    color:#0b1020;font-weight:900;
+    box-shadow: 0 18px 55px rgba(96,165,250,.15);
+  }
+
+  .hero{
+    margin-top:16px;
+    border:1px solid var(--line);
+    border-radius: var(--radius);
+    background: linear-gradient(180deg, rgba(15,27,51,.78), rgba(11,20,38,.72));
+    backdrop-filter: blur(10px);
+    box-shadow: var(--shadow);
+    padding:20px;
+    overflow:hidden;
+    position:relative;
+  }
+  .hero:before{
+    content:"";
+    position:absolute; inset:-2px;
+    background:
+      radial-gradient(520px 240px at 14% 0%, rgba(245,158,11,.22), transparent 60%),
+      radial-gradient(520px 240px at 92% 0%, rgba(96,165,250,.22), transparent 60%);
+    pointer-events:none;
+  }
+  .heroInner{position:relative}
+  .title{
+    font-size:44px;line-height:1.03;margin:0 0 10px 0;letter-spacing:-.4px;
+  }
+  .muted{color:var(--muted)}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  .grid{display:grid;gap:16px;grid-template-columns: 1.15fr .85fr; margin-top:16px}
+  @media (max-width:980px){ .grid{grid-template-columns:1fr} .nav{position:static} .title{font-size:38px} }
+
+  .card{
+    border:1px solid var(--line);
+    border-radius: var(--radius);
+    background:rgba(15,27,51,.72);
+    backdrop-filter: blur(10px);
+    box-shadow: var(--shadow);
+    padding:18px;
+  }
+  .card.soft{background:rgba(11,20,38,.76)}
+  .hr{height:1px;background:rgba(35,52,85,.9);margin:14px 0;border:0}
+
+  .kpis{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
+  .kpi{min-width:160px;padding:10px 12px;border-radius:14px;border:1px solid var(--line);background:rgba(11,20,38,.86);font-size:12px}
+  .kpi b{display:block;font-size:14px;color:var(--text)}
+
+  /* Load board + filters */
+  .filters{
+    display:grid; gap:10px;
+    grid-template-columns: 1.2fr 1.2fr 1fr 1fr 1fr;
+  }
+  @media (max-width:980px){ .filters{grid-template-columns:1fr 1fr} }
+  input,select,textarea{
+    width:100%; padding:12px 12px; border-radius:12px; border:1px solid var(--line);
+    background:rgba(11,20,38,.92); color:var(--text); outline:none;
+  }
+  textarea{min-height:86px;resize:vertical}
+  input:focus,select:focus,textarea:focus{border-color:rgba(245,158,11,.55)}
+  .small{font-size:12px}
+  .badge{
+    display:inline-flex;gap:8px;align-items:center;
+    padding:6px 10px;border-radius:999px;border:1px solid var(--line);
+    background:rgba(11,20,38,.86); color:var(--muted); font-size:12px;
+  }
+  .badge.ok{border-color:rgba(34,197,94,.35); background:rgba(34,197,94,.10); color:rgba(220,255,240,.92)}
+  .badge.warn{border-color:rgba(251,191,36,.35); background:rgba(251,191,36,.10); color:rgba(255,250,220,.92)}
+  .badge.blue{border-color:rgba(96,165,250,.35); background:rgba(96,165,250,.10); color:rgba(220,235,255,.92)}
+  .badge.orange{border-color:rgba(245,158,11,.35); background:rgba(245,158,11,.10); color:rgba(255,243,220,.92)}
+
+  .load{
+    margin-top:12px;
+    padding:14px;
+    border-radius:16px;
+    border:1px solid rgba(255,255,255,.08);
+    background:rgba(11,20,38,.78);
+  }
+  .loadTop{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:flex-start}
+  .lane{font-size:16px;font-weight:900}
+  .price{font-size:18px;font-weight:1000}
+  .kv{display:grid;grid-template-columns: 210px 1fr;gap:6px;margin-top:10px}
+  @media (max-width:780px){ .kv{grid-template-columns:1fr} }
+  .k{color:var(--muted)}
+  .pillStatus{
+    padding:6px 10px;border-radius:999px;border:1px solid var(--line);
+    background:rgba(11,20,38,.86); color:var(--muted); font-size:12px;
+  }
+  .pillStatus.open{border-color:rgba(96,165,250,.35);background:rgba(96,165,250,.10);color:rgba(220,235,255,.92)}
+  .pillStatus.booked{border-color:rgba(34,197,94,.35);background:rgba(34,197,94,.10);color:rgba(220,255,240,.92)}
+  .pillStatus.requested{border-color:rgba(251,191,36,.35);background:rgba(251,191,36,.10);color:rgba(255,250,220,.92)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav">
+    <div class="brand">
+      <div class="mark" aria-hidden="true">🚚</div>
+      <div>
+        <h1>Direct Freight Exchange</h1>
+        <div class="sub">Direct shipper ↔ carrier • Transparent loads • Orange + Blue</div>
+      </div>
+    </div>
+    <div class="right">
+      ${rolePill}${userPill}
+      <a class="btn" href="/">Home</a>
+      <a class="btn" href="/loads">Load Board</a>
+      ${user ? `<a class="btn blue" href="/dashboard">Dashboard</a><a class="btn" href="/logout">Logout</a>`
+             : `<a class="btn" href="/signup">Sign up</a><a class="btn blue" href="/login">Login</a>`}
+    </div>
+  </div>
+  ${body}
+</div>
+</body>
+</html>`;
+}
+
 async function initDb() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
@@ -163,10 +280,12 @@ async function initDb() {
     CREATE TABLE IF NOT EXISTS loads (
       id SERIAL PRIMARY KEY,
       shipper_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+
       lane_from TEXT NOT NULL,
       lane_to TEXT NOT NULL,
       pickup_date TEXT NOT NULL,
       delivery_date TEXT NOT NULL,
+
       equipment TEXT NOT NULL,
       weight_lbs INTEGER NOT NULL,
       commodity TEXT NOT NULL,
@@ -183,60 +302,99 @@ async function initDb() {
       accessorials TEXT NOT NULL,
       special_requirements TEXT NOT NULL,
 
+      status TEXT NOT NULL DEFAULT 'OPEN' CHECK (status IN ('OPEN','REQUESTED','BOOKED')),
+
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
   `);
 }
 
+/* ---------------- Routes ---------------- */
+
 app.get("/", (req, res) => {
   const user = getUser(req);
+
   const body = `
+    <div class="hero">
+      <div class="heroInner">
+        <div class="badge orange">Full transparency by default</div>
+        <h2 class="title">Connect truckers directly with shippers — no hidden load details.</h2>
+        <div class="muted">
+          Every load shows: <b>all-in rate</b>, miles, weight, equipment, pickup/delivery, <b>payment terms</b>,
+          <b>detention</b>, appointment type, accessorials, and notes. No “call for rate.”
+        </div>
+
+        <div class="kpis">
+          <div class="kpi"><b>Direct marketplace</b><span class="muted">Shipper ↔ Carrier workflow</span></div>
+          <div class="kpi"><b>Transparent load cards</b><span class="muted">Rate + terms up front</span></div>
+          <div class="kpi"><b>Compliance-first</b><span class="muted">Insurance • Authority • W-9 (next)</span></div>
+        </div>
+
+        <div class="row" style="margin-top:14px">
+          <a class="btn orange" href="${user ? "/dashboard" : "/signup"}">${user ? "Go to Dashboard" : "Create account"}</a>
+          <a class="btn blue" href="/loads">Browse Load Board</a>
+          ${user ? "" : `<a class="btn" href="/login">Login</a>`}
+        </div>
+      </div>
+    </div>
+
     <div class="grid">
       <div class="card">
-        <h2 style="margin:0 0 10px 0; font-size:38px; line-height:1.05">Direct shipper ↔ carrier matching with full load transparency.</h2>
+        <h3 style="margin-top:0">For Shippers</h3>
         <div class="muted">
-          Every load shows the details upfront: <b>all-in rate, miles, weight, equipment, pickup/delivery, payment terms, detention, accessorials</b>.
+          Post loads with full details so carriers can commit fast.
+          (Next: Stripe subscription to post + invoices/receipts.)
         </div>
         <div class="hr"></div>
         <div class="row">
-          <a class="btn primary" href="/signup">Create account</a>
-          <a class="btn blue" href="/login">Login</a>
-          <a class="btn" href="/loads">View Load Board</a>
-          ${user ? `<a class="btn" href="/dashboard">Go to Dashboard</a>` : ``}
+          <span class="badge ok">✅ Transparent rate</span>
+          <span class="badge ok">✅ Terms & QuickPay</span>
+          <span class="badge ok">✅ Detention policy</span>
+          <span class="badge ok">✅ Accessorials</span>
         </div>
       </div>
 
       <div class="card soft">
-        <h3 style="margin-top:0">Transparent default fields</h3>
+        <h3 style="margin-top:0">For Carriers</h3>
         <div class="muted">
-          Rate (all-in), Payment terms (NET 30 default), QuickPay flag, Detention ($/hr + after X hrs),
-          Appointment type (FCFS / Appt), Accessorials, Special requirements.
+          See the full picture up front: equipment, dates, miles, pay, and requirements.
+          (Next: compliance uploads + verified badge.)
+        </div>
+        <div class="hr"></div>
+        <div class="row">
+          <span class="badge blue">🟦 No games</span>
+          <span class="badge orange">🟧 No “call for rate”</span>
+          <span class="badge warn">⏱ Detention clearly stated</span>
         </div>
       </div>
     </div>
   `;
-  res.send(layout("DFX", user, body));
+
+  res.send(layout({ title: "DFX", user, body }));
 });
 
 app.get("/signup", (req, res) => {
   const user = getUser(req);
   const body = `
     <div class="card">
-      <h2 style="margin-top:0">Sign up</h2>
+      <h2 style="margin-top:0">Create an account</h2>
+      <div class="muted small">Choose Shipper or Carrier. Admin comes later.</div>
+      <div class="hr"></div>
       <form method="POST" action="/signup">
-        <div class="formGrid">
+        <div class="filters" style="grid-template-columns: 1.2fr 1.2fr 1fr 1fr 1fr;">
           <input name="email" type="email" placeholder="Email" required />
-          <input name="password" type="password" placeholder="Password (min 8 chars)" required minlength="8" />
+          <input name="password" type="password" placeholder="Password (min 8 chars)" minlength="8" required />
           <select name="role" required>
             <option value="SHIPPER">Shipper</option>
             <option value="CARRIER">Carrier</option>
           </select>
-          <button class="btn primary" type="submit">Create account</button>
+          <button class="btn orange" type="submit">Create account</button>
+          <a class="btn" href="/login">Login</a>
         </div>
       </form>
     </div>
   `;
-  res.send(layout("Sign up", user, body));
+  res.send(layout({ title: "Sign up", user, body }));
 });
 
 app.post("/signup", async (req, res) => {
@@ -266,17 +424,20 @@ app.get("/login", (req, res) => {
   const body = `
     <div class="card">
       <h2 style="margin-top:0">Login</h2>
+      <div class="muted small">You’ll stay logged in for 7 days.</div>
+      <div class="hr"></div>
       <form method="POST" action="/login">
-        <div class="formGrid">
+        <div class="filters" style="grid-template-columns: 1.2fr 1.2fr 1fr 1fr 1fr;">
           <input name="email" type="email" placeholder="Email" required />
           <input name="password" type="password" placeholder="Password" required />
           <button class="btn blue" type="submit">Login</button>
           <a class="btn" href="/signup">Create account</a>
+          <a class="btn" href="/loads">Load Board</a>
         </div>
       </form>
     </div>
   `;
-  res.send(layout("Login", user, body));
+  res.send(layout({ title: "Login", user, body }));
 });
 
 app.post("/login", async (req, res) => {
@@ -306,28 +467,39 @@ app.get("/dashboard", requireAuth, async (req, res) => {
 
   if (user.role === "SHIPPER") {
     const loads = await pool.query(
-      "SELECT id,lane_from,lane_to,pickup_date,delivery_date,rate_all_in,miles,equipment,weight_lbs,commodity,payment_terms,quickpay_available,detention_rate_per_hr,detention_after_hours,appointment_type,accessorials,special_requirements,created_at FROM loads WHERE shipper_id=$1 ORDER BY created_at DESC",
+      `SELECT * FROM loads WHERE shipper_id=$1 ORDER BY created_at DESC`,
       [user.id]
     );
 
     const body = `
       <div class="grid">
         <div class="card">
-          <h2 style="margin-top:0">Shipper Dashboard</h2>
-          <div class="muted">Post a fully transparent load (default settings included).</div>
+          <div class="row" style="justify-content:space-between">
+            <div>
+              <h2 style="margin:0">Shipper Dashboard</h2>
+              <div class="muted small">Post loads with full transparency (default fields included).</div>
+            </div>
+            <span class="badge warn">Stripe subscription (next)</span>
+          </div>
           <div class="hr"></div>
 
           <form method="POST" action="/shipper/loads">
-            <div class="formGrid">
+            <div class="filters">
               <input name="lane_from" placeholder="From (City, ST)" required />
               <input name="lane_to" placeholder="To (City, ST)" required />
-              <input name="pickup_date" placeholder="Pickup date (e.g., 2025-12-15)" required />
-              <input name="delivery_date" placeholder="Delivery date (e.g., 2025-12-16)" required />
-              <input name="equipment" placeholder="Equipment (e.g., Dry Van / Reefer / Flatbed)" required />
-              <input name="commodity" placeholder="Commodity (e.g., General Freight)" value="General Freight" required />
+              <input name="pickup_date" placeholder="Pickup date (YYYY-MM-DD)" required />
+              <input name="delivery_date" placeholder="Delivery date (YYYY-MM-DD)" required />
+              <select name="equipment" required>
+                <option>Dry Van</option>
+                <option>Reefer</option>
+                <option>Flatbed</option>
+                <option>Power Only</option>
+                <option>Stepdeck</option>
+              </select>
+
               <input name="weight_lbs" type="number" placeholder="Weight (lbs)" value="42000" required />
               <input name="miles" type="number" placeholder="Miles" value="800" required />
-
+              <input name="commodity" placeholder="Commodity" value="General Freight" required />
               <input name="rate_all_in" type="number" step="0.01" placeholder="All-in rate ($)" value="2500" required />
               <select name="payment_terms" required>
                 <option value="NET 30">NET 30 (default)</option>
@@ -343,91 +515,73 @@ app.get("/dashboard", requireAuth, async (req, res) => {
 
               <input name="detention_rate_per_hr" type="number" step="0.01" placeholder="Detention $/hr" value="75" required />
               <input name="detention_after_hours" type="number" placeholder="Detention after (hours)" value="2" required />
-
               <select name="appointment_type" required>
                 <option value="FCFS">Appointment: FCFS (default)</option>
                 <option value="Appt Required">Appointment: Appt Required</option>
               </select>
-
-              <input name="accessorials" placeholder="Accessorials (e.g., lumper, stop-off, hazmat, tarp)" value="None" required />
-              <textarea name="special_requirements" placeholder="Special requirements / notes (gate codes, PPE, trailer size, etc.)">None</textarea>
+              <input name="accessorials" placeholder="Accessorials (e.g., lumper, tarp, stop-off)" value="None" required />
+              <input name="special_requirements" placeholder="Notes (PPE, gate code, trailer size, etc.)" value="None" required />
             </div>
 
             <div class="row" style="margin-top:12px">
-              <button class="btn primary" type="submit">Post Transparent Load</button>
-              <a class="btn" href="/loads">View Load Board</a>
+              <button class="btn orange" type="submit">Post Load</button>
+              <a class="btn blue" href="/loads">View Load Board</a>
+              <span class="badge ok">Transparency checklist enforced</span>
             </div>
           </form>
         </div>
 
         <div class="card soft">
-          <h3 style="margin-top:0">Your posted loads</h3>
-          ${loads.rows.length ? loads.rows.map(l => `
-            <div class="load">
-              <h3>#${l.id} ${escapeHtml(l.lane_from)} → ${escapeHtml(l.lane_to)}</h3>
-              <div class="kv">
-                <div class="k">Pickup / Delivery</div><div>${escapeHtml(l.pickup_date)} → ${escapeHtml(l.delivery_date)}</div>
-                <div class="k">Equipment</div><div>${escapeHtml(l.equipment)}</div>
-                <div class="k">Weight / Commodity</div><div>${Number(l.weight_lbs).toLocaleString()} lbs • ${escapeHtml(l.commodity)}</div>
-                <div class="k">Miles / Rate</div><div>${Number(l.miles).toLocaleString()} • <b>${money(l.rate_all_in)}</b> (all-in)</div>
-                <div class="k">Payment terms</div><div>${escapeHtml(l.payment_terms)} • QuickPay: ${l.quickpay_available ? "Yes" : "No"}</div>
-                <div class="k">Detention</div><div>${money(l.detention_rate_per_hr)}/hr after ${escapeHtml(l.detention_after_hours)} hrs</div>
-                <div class="k">Appointment</div><div>${escapeHtml(l.appointment_type)}</div>
-                <div class="k">Accessorials</div><div>${escapeHtml(l.accessorials)}</div>
-                <div class="k">Notes</div><div>${escapeHtml(l.special_requirements)}</div>
-              </div>
-            </div>
-          `).join("") : `<div class="muted">No loads yet.</div>`}
+          <div class="row" style="justify-content:space-between">
+            <h3 style="margin:0">Your Loads</h3>
+            <span class="badge blue">${loads.rows.length} total</span>
+          </div>
+          <div class="hr"></div>
+          ${loads.rows.length ? loads.rows.map(l => loadCard(l)).join("") : `<div class="muted">No loads yet.</div>`}
         </div>
       </div>
     `;
-    return res.send(layout("Shipper Dashboard", user, body));
+
+    return res.send(layout({ title: "Shipper Dashboard", user, body }));
   }
 
   if (user.role === "CARRIER") {
-    const loads = await pool.query(
-      "SELECT id,lane_from,lane_to,pickup_date,delivery_date,rate_all_in,miles,equipment,weight_lbs,commodity,payment_terms,quickpay_available,detention_rate_per_hr,detention_after_hours,appointment_type,accessorials,special_requirements,created_at FROM loads ORDER BY created_at DESC LIMIT 50"
-    );
-
+    const loads = await pool.query(`SELECT * FROM loads ORDER BY created_at DESC LIMIT 100`);
     const body = `
       <div class="card">
-        <h2 style="margin-top:0">Carrier Dashboard</h2>
-        <div class="muted">Full transparency load board (no hidden details).</div>
+        <div class="row" style="justify-content:space-between">
+          <div>
+            <h2 style="margin:0">Carrier Dashboard</h2>
+            <div class="muted small">Browse fully transparent loads. (Request-to-book is next.)</div>
+          </div>
+          <span class="badge warn">Compliance badge (next)</span>
+        </div>
         <div class="hr"></div>
         <div class="row">
           <a class="btn blue" href="/loads">Open Load Board</a>
+          <span class="badge ok">Rate + terms visible</span>
+          <span class="badge ok">Detention visible</span>
+          <span class="badge ok">Accessorials visible</span>
         </div>
       </div>
 
       <div class="card soft" style="margin-top:16px">
-        <h3 style="margin-top:0">Latest loads</h3>
-        ${loads.rows.length ? loads.rows.map(l => `
-          <div class="load">
-            <h3>#${l.id} ${escapeHtml(l.lane_from)} → ${escapeHtml(l.lane_to)}</h3>
-            <div class="kv">
-              <div class="k">Pickup / Delivery</div><div>${escapeHtml(l.pickup_date)} → ${escapeHtml(l.delivery_date)}</div>
-              <div class="k">Equipment</div><div>${escapeHtml(l.equipment)}</div>
-              <div class="k">Weight / Commodity</div><div>${Number(l.weight_lbs).toLocaleString()} lbs • ${escapeHtml(l.commodity)}</div>
-              <div class="k">Miles / Rate</div><div>${Number(l.miles).toLocaleString()} • <b>${money(l.rate_all_in)}</b> (all-in)</div>
-              <div class="k">Payment terms</div><div>${escapeHtml(l.payment_terms)} • QuickPay: ${l.quickpay_available ? "Yes" : "No"}</div>
-              <div class="k">Detention</div><div>${money(l.detention_rate_per_hr)}/hr after ${escapeHtml(l.detention_after_hours)} hrs</div>
-              <div class="k">Appointment</div><div>${escapeHtml(l.appointment_type)}</div>
-              <div class="k">Accessorials</div><div>${escapeHtml(l.accessorials)}</div>
-              <div class="k">Notes</div><div>${escapeHtml(l.special_requirements)}</div>
-            </div>
-            <div class="row" style="margin-top:12px">
-              <button class="btn primary" disabled title="Next feature">Request to Book (next)</button>
-              <span class="pill">Direct shipper ↔ carrier booking is next</span>
-            </div>
-          </div>
-        `).join("") : `<div class="muted">No loads posted yet.</div>`}
+        <div class="row" style="justify-content:space-between">
+          <h3 style="margin:0">Latest Loads</h3>
+          <span class="badge blue">${loads.rows.length} shown</span>
+        </div>
+        <div class="hr"></div>
+        ${loads.rows.length ? loads.rows.map(l => loadCard(l, true)).join("") : `<div class="muted">No loads posted yet.</div>`}
       </div>
     `;
-    return res.send(layout("Carrier Dashboard", user, body));
+    return res.send(layout({ title: "Carrier Dashboard", user, body }));
   }
 
-  // ADMIN placeholder
-  return res.send(layout("Admin", user, `<div class="card"><h2>Admin</h2><div class="muted">Next: document approvals + compliance enforcement.</div></div>`));
+  return res.send(layout({
+    title: "Admin",
+    user,
+    body: `<div class="card"><h2 style="margin-top:0">Admin</h2><div class="muted">Next: approve/reject carrier compliance docs + enforce badges.</div></div>`
+  }));
 });
 
 app.post("/shipper/loads", requireAuth, async (req, res) => {
@@ -439,31 +593,39 @@ app.post("/shipper/loads", requireAuth, async (req, res) => {
   const delivery_date = String(req.body.delivery_date || "").trim();
   const equipment = String(req.body.equipment || "").trim();
   const commodity = String(req.body.commodity || "").trim();
-  const weight_lbs = Number(req.body.weight_lbs);
-  const miles = Number(req.body.miles);
+
+  const weight_lbs = int(req.body.weight_lbs);
+  const miles = int(req.body.miles);
 
   const rate_all_in = Number(req.body.rate_all_in);
   const payment_terms = String(req.body.payment_terms || "NET 30").trim();
   const quickpay_available = String(req.body.quickpay_available || "false") === "true";
 
   const detention_rate_per_hr = Number(req.body.detention_rate_per_hr);
-  const detention_after_hours = Number(req.body.detention_after_hours);
+  const detention_after_hours = int(req.body.detention_after_hours);
 
   const appointment_type = String(req.body.appointment_type || "FCFS").trim();
   const accessorials = String(req.body.accessorials || "None").trim();
   const special_requirements = String(req.body.special_requirements || "None").trim();
 
-  if (!lane_from || !lane_to || !pickup_date || !delivery_date || !equipment || !commodity) return res.status(400).send("Missing required fields.");
-  if (![weight_lbs, miles, rate_all_in, detention_rate_per_hr, detention_after_hours].every(n => Number.isFinite(n))) return res.status(400).send("Numeric fields invalid.");
+  if (!lane_from || !lane_to || !pickup_date || !delivery_date || !equipment || !commodity) {
+    return res.status(400).send("Missing required fields.");
+  }
+  if (![weight_lbs, miles, detention_after_hours].every(n => Number.isFinite(n) && n > 0)) {
+    return res.status(400).send("Numeric fields invalid.");
+  }
+  if (![rate_all_in, detention_rate_per_hr].every(n => Number.isFinite(n) && n >= 0)) {
+    return res.status(400).send("Rate/detention invalid.");
+  }
 
   await pool.query(
     `INSERT INTO loads
       (shipper_id,lane_from,lane_to,pickup_date,delivery_date,equipment,weight_lbs,commodity,miles,
        rate_all_in,payment_terms,quickpay_available,detention_rate_per_hr,detention_after_hours,
-       appointment_type,accessorials,special_requirements)
+       appointment_type,accessorials,special_requirements,status)
      VALUES
       ($1,$2,$3,$4,$5,$6,$7,$8,$9,
-       $10,$11,$12,$13,$14,$15,$16,$17)`,
+       $10,$11,$12,$13,$14,$15,$16,$17,'OPEN')`,
     [
       req.user.id, lane_from, lane_to, pickup_date, delivery_date, equipment, weight_lbs, commodity, miles,
       rate_all_in, payment_terms, quickpay_available, detention_rate_per_hr, detention_after_hours,
@@ -476,35 +638,137 @@ app.post("/shipper/loads", requireAuth, async (req, res) => {
 
 app.get("/loads", async (req, res) => {
   const user = getUser(req);
-  const loads = await pool.query(
-    "SELECT id,lane_from,lane_to,pickup_date,delivery_date,rate_all_in,miles,equipment,weight_lbs,commodity,payment_terms,quickpay_available,detention_rate_per_hr,detention_after_hours,appointment_type,accessorials,special_requirements,created_at FROM loads ORDER BY created_at DESC LIMIT 100"
-  );
+
+  // Filters (query params)
+  const q = String(req.query.q || "").trim().toLowerCase();
+  const equipment = String(req.query.equipment || "").trim();
+  const minRate = Number(req.query.minRate);
+  const maxMiles = Number(req.query.maxMiles);
+  const sort = String(req.query.sort || "new").trim(); // new | rate | rpm
+
+  // Get loads (limit)
+  const r = await pool.query(`SELECT * FROM loads ORDER BY created_at DESC LIMIT 200`);
+  let loads = r.rows;
+
+  // Apply filters in memory (simple + reliable for now)
+  if (q) {
+    loads = loads.filter(l =>
+      `${l.lane_from} ${l.lane_to} ${l.commodity}`.toLowerCase().includes(q)
+    );
+  }
+  if (equipment) {
+    loads = loads.filter(l => String(l.equipment) === equipment);
+  }
+  if (Number.isFinite(minRate)) {
+    loads = loads.filter(l => Number(l.rate_all_in) >= minRate);
+  }
+  if (Number.isFinite(maxMiles)) {
+    loads = loads.filter(l => Number(l.miles) <= maxMiles);
+  }
+
+  // Sorting
+  if (sort === "rate") {
+    loads.sort((a, b) => Number(b.rate_all_in) - Number(a.rate_all_in));
+  } else if (sort === "rpm") {
+    loads.sort((a, b) => (Number(b.rate_all_in) / Math.max(1, Number(b.miles))) - (Number(a.rate_all_in) / Math.max(1, Number(a.miles))));
+  } // "new" stays as-is
+
+  const uniqueEquip = Array.from(new Set(r.rows.map(x => x.equipment))).filter(Boolean).sort();
 
   const body = `
     <div class="card">
-      <h2 style="margin-top:0">Load Board (Fully Transparent)</h2>
-      <div class="muted">Every load shows rate + terms + detention + accessorials. No hidden details.</div>
-      <div class="hr"></div>
-      ${loads.rows.length ? loads.rows.map(l => `
-        <div class="load">
-          <h3>#${l.id} ${escapeHtml(l.lane_from)} → ${escapeHtml(l.lane_to)}</h3>
-          <div class="kv">
-            <div class="k">Pickup / Delivery</div><div>${escapeHtml(l.pickup_date)} → ${escapeHtml(l.delivery_date)}</div>
-            <div class="k">Equipment</div><div>${escapeHtml(l.equipment)}</div>
-            <div class="k">Weight / Commodity</div><div>${Number(l.weight_lbs).toLocaleString()} lbs • ${escapeHtml(l.commodity)}</div>
-            <div class="k">Miles / Rate</div><div>${Number(l.miles).toLocaleString()} • <b>${money(l.rate_all_in)}</b> (all-in)</div>
-            <div class="k">Payment terms</div><div>${escapeHtml(l.payment_terms)} • QuickPay: ${l.quickpay_available ? "Yes" : "No"}</div>
-            <div class="k">Detention</div><div>${money(l.detention_rate_per_hr)}/hr after ${escapeHtml(l.detention_after_hours)} hrs</div>
-            <div class="k">Appointment</div><div>${escapeHtml(l.appointment_type)}</div>
-            <div class="k">Accessorials</div><div>${escapeHtml(l.accessorials)}</div>
-            <div class="k">Notes</div><div>${escapeHtml(l.special_requirements)}</div>
-          </div>
+      <div class="row" style="justify-content:space-between">
+        <div>
+          <h2 style="margin:0">Load Board</h2>
+          <div class="muted small">Full transparency: rate + terms + detention + accessorials on every load.</div>
         </div>
-      `).join("") : `<div class="muted">No loads posted yet.</div>`}
+        <span class="badge ok">${loads.length} matches</span>
+      </div>
+      <div class="hr"></div>
+
+      <form method="GET" action="/loads">
+        <div class="filters">
+          <input name="q" placeholder="Search lane/commodity (e.g., Chicago, Dallas, steel)" value="${escapeHtml(req.query.q || "")}" />
+          <select name="equipment">
+            <option value="">All equipment</option>
+            ${uniqueEquip.map(e => `<option ${e === equipment ? "selected" : ""}>${escapeHtml(e)}</option>`).join("")}
+          </select>
+          <input name="minRate" type="number" step="0.01" placeholder="Min all-in rate ($)" value="${escapeHtml(req.query.minRate || "")}" />
+          <input name="maxMiles" type="number" placeholder="Max miles" value="${escapeHtml(req.query.maxMiles || "")}" />
+          <select name="sort">
+            <option value="new" ${sort === "new" ? "selected" : ""}>Sort: Newest</option>
+            <option value="rate" ${sort === "rate" ? "selected" : ""}>Sort: Highest rate</option>
+            <option value="rpm" ${sort === "rpm" ? "selected" : ""}>Sort: Best $/mile</option>
+          </select>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <button class="btn blue" type="submit">Apply Filters</button>
+          <a class="btn" href="/loads">Clear</a>
+          ${user ? `<a class="btn orange" href="/dashboard">Dashboard</a>` : `<a class="btn orange" href="/signup">Create account</a>`}
+          <span class="badge orange">No “call for rate”</span>
+        </div>
+      </form>
+    </div>
+
+    <div class="card soft" style="margin-top:16px">
+      <div class="row" style="justify-content:space-between">
+        <h3 style="margin:0">Loads</h3>
+        <span class="badge blue">Showing up to 200</span>
+      </div>
+      <div class="hr"></div>
+      ${loads.length ? loads.map(l => loadCard(l, user?.role === "CARRIER")).join("") : `<div class="muted">No loads match your filters.</div>`}
     </div>
   `;
-  res.send(layout("Load Board", user, body));
+
+  res.send(layout({ title: "Load Board", user, body }));
 });
+
+/* UI helper: load card */
+function loadCard(l, showCarrierHint = false) {
+  const rpm = Number(l.rate_all_in) / Math.max(1, Number(l.miles));
+  const status = String(l.status || "OPEN");
+  const statusClass = status === "BOOKED" ? "booked" : status === "REQUESTED" ? "requested" : "open";
+
+  const transparencyBadges = `
+    <span class="badge ok">Rate: ${money(l.rate_all_in)} all-in</span>
+    <span class="badge ok">Terms: ${escapeHtml(l.payment_terms)}${l.quickpay_available ? " • QuickPay" : ""}</span>
+    <span class="badge ok">Detention: ${money(l.detention_rate_per_hr)}/hr after ${escapeHtml(l.detention_after_hours)}h</span>
+    <span class="badge ok">Accessorials: ${escapeHtml(l.accessorials)}</span>
+  `;
+
+  return `
+    <div class="load">
+      <div class="loadTop">
+        <div>
+          <div class="lane">#${l.id} ${escapeHtml(l.lane_from)} → ${escapeHtml(l.lane_to)}</div>
+          <div class="muted small">${escapeHtml(l.pickup_date)} → ${escapeHtml(l.delivery_date)} • ${escapeHtml(l.equipment)}</div>
+        </div>
+        <div style="text-align:right">
+          <div class="price">${money(l.rate_all_in)} <span class="muted small">(all-in)</span></div>
+          <div class="muted small">${int(l.miles).toLocaleString()} mi • <b>${money(rpm)}</b>/mi</div>
+          <div style="margin-top:6px"><span class="pillStatus ${statusClass}">${escapeHtml(status)}</span></div>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:10px">${transparencyBadges}</div>
+
+      <div class="kv">
+        <div class="k">Weight / Commodity</div><div>${int(l.weight_lbs).toLocaleString()} lbs • ${escapeHtml(l.commodity)}</div>
+        <div class="k">Appointment</div><div>${escapeHtml(l.appointment_type)}</div>
+        <div class="k">Notes</div><div>${escapeHtml(l.special_requirements)}</div>
+      </div>
+
+      ${showCarrierHint ? `
+        <div class="row" style="margin-top:12px">
+          <button class="btn orange" disabled title="Next feature">Request to Book (next)</button>
+          <span class="badge warn">Direct booking workflow is next</span>
+        </div>` : ``}
+    </div>
+  `;
+}
+
+/* Health */
+app.get("/health", (_, res) => res.json({ ok: true }));
 
 initDb()
   .then(() => app.listen(PORT, "0.0.0.0", () => console.log("Server running on port", PORT)))
