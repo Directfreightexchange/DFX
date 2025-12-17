@@ -28,7 +28,6 @@ const pkgJson = await PackageJson.load(path)
 //     "abbrev": "^1.1.1"
 //   }
 // }
-
 pkgJson.update({
   dependencies: {
     a: '^1.0.0',
@@ -38,7 +37,6 @@ pkgJson.update({
     './new-workspace',
   ],
 })
-
 await pkgJson.save()
 // $ cat package.json
 // {
