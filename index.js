@@ -859,7 +859,7 @@ function postingAllowed(billing) {
 }
 
 /* ---------- Dashboards (unchanged logic, UI uses new theme) ---------- */
-app.get("/dashboard", requireAuth, async (req, res) => {
+app.get("/dashboard", requireAuth, async (req, res) => {   try {   try {
   const user = req.user;
 
   if (user.role === "SHIPPER") {
