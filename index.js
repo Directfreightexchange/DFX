@@ -802,7 +802,7 @@ app.get("/", (req, res) => {
           <span class="badge ok">Starter: 15 loads</span>
           <span class="badge ok">Growth: 30 loads</span>
           <span class="badge ok">Enterprise: Unlimited</span>
-          <a class="btn green" href="/shipper/plans">View Plans</a>
+          <a class="btn green" ${user?.role === "SHIPPER"   ? `<a class="btn green" href="/shipper/plans">View Plans</a>`   : `<a class="btn green" href="/signup">Sign up as Shipper</a>` }>View Plans</a>
         </div>
       </div>
 
