@@ -802,7 +802,10 @@ app.get("/", (req, res) => {
           <span class="badge ok">Starter: 15 loads</span>
           <span class="badge ok">Growth: 30 loads</span>
           <span class="badge ok">Enterprise: Unlimited</span>
-          <a class="btn green" ${user?.role === "SHIPPER"   ? `<a class="btn green" href="/shipper/plans">View Plans</a>`   : `<a class="btn green" href="/signup">Sign up as Shipper</a>` }>View Plans</a>
+          ${user?.role === "SHIPPER"
+            ? `<a class="btn green" href="/shipper/plans">View Plans</a>`
+            : `<a class="btn green" href="/signup">Sign up as Shipper</a>`
+          }
         </div>
       </div>
 
@@ -858,230 +861,237 @@ function postingAllowed(billing) {
   return { ok: true, reason: null };
 }
 
-/* ---------- Dashboards (unchanged logic, UI uses new theme) ---------- */
-app.get("/dashboard", requireAuth, async (req, res) => {   try {   try {
-  const user = req.user;
+/* ---------- Dashboards ---------- */
+app.get("/dashboard", requireAuth, async (req, res) => {
+  try {
+    const user = req.user;
 
-  if (user.role === "SHIPPER") {
-    const billing = await getAndNormalizeBilling(user.id);
-    const gate = postingAllowed(billing);
+    if (user.role === "SHIPPER") {
+      const billing = await getAndNormalizeBilling(user.id);
+      const gate = postingAllowed(billing);
 
-    const planLabel = billing.plan ? PLANS[billing.plan]?.label : "None";
-    const limitText =
-      billing.monthly_limit === -1 ? "Unlimited" :
-      `${billing.loads_used} / ${billing.monthly_limit} used this month`;
+      const planLabel = billing.plan ? PLANS[billing.plan]?.label : "None";
+      const limitText =
+        billing.monthly_limit === -1 ? "Unlimited" :
+        `${billing.loads_used} / ${billing.monthly_limit} used this month`;
 
-    const myLoads = await pool.query(`SELECT * FROM loads WHERE shipper_id=$1 ORDER BY created_at DESC`, [user.id]);
+      const myLoads = await pool.query(`SELECT * FROM loads WHERE shipper_id=$1 ORDER BY created_at DESC`, [user.id]);
 
-    const requests = await pool.query(`
-      SELECT lr.id as request_id, lr.status as request_status, lr.created_at,
-             lr.carrier_id,
-             l.id as load_id, l.lane_from, l.lane_to,
-             u.email as carrier_email,
-             cc.status as carrier_compliance
-      FROM load_requests lr
-      JOIN loads l ON l.id = lr.load_id
-      JOIN users u ON u.id = lr.carrier_id
-      LEFT JOIN carriers_compliance cc ON cc.carrier_id = lr.carrier_id
-      WHERE l.shipper_id=$1
-      ORDER BY lr.created_at DESC
+      const requests = await pool.query(`
+        SELECT lr.id as request_id, lr.status as request_status, lr.created_at,
+               lr.carrier_id,
+               l.id as load_id, l.lane_from, l.lane_to,
+               u.email as carrier_email,
+               cc.status as carrier_compliance
+        FROM load_requests lr
+        JOIN loads l ON l.id = lr.load_id
+        JOIN users u ON u.id = lr.carrier_id
+        LEFT JOIN carriers_compliance cc ON cc.carrier_id = lr.carrier_id
+        WHERE l.shipper_id=$1
+        ORDER BY lr.created_at DESC
+        LIMIT 200
+      `, [user.id]);
+
+      const body = `
+        <div class="grid">
+          <div class="card">
+            <div class="row" style="justify-content:space-between">
+              <div>
+                <h2 style="margin:0">Shipper Dashboard</h2>
+                <div class="muted">All-in pricing. Transparent terms. Fast booking.</div>
+              </div>
+              <span class="badge ${billing.status === "ACTIVE" ? "ok" : "warn"}">Billing: ${escapeHtml(billing.status)}</span>
+            </div>
+
+            <div class="hr"></div>
+
+            <div class="row">
+              <span class="badge">Plan: ${escapeHtml(planLabel)}</span>
+              <span class="badge brand">${escapeHtml(limitText)}</span>
+              <a class="btn green" href="/shipper/plans">Manage Plan</a>
+            </div>
+
+            <div class="hr"></div>
+
+            <h3 style="margin:0 0 10px 0">Post a transparent load</h3>
+
+            ${gate.ok ? `
+            <form method="POST" action="/shipper/loads">
+              <div class="filters">
+                <input name="lane_from" placeholder="From (City, ST)" required />
+                <input name="lane_to" placeholder="To (City, ST)" required />
+                <input name="pickup_date" placeholder="Pickup date (YYYY-MM-DD)" required />
+                <input name="delivery_date" placeholder="Delivery date (YYYY-MM-DD)" required />
+                <select name="equipment" required>
+                  <option>Dry Van</option><option>Reefer</option><option>Flatbed</option><option>Power Only</option><option>Stepdeck</option>
+                </select>
+
+                <input name="weight_lbs" type="number" placeholder="Weight (lbs)" value="42000" required />
+                <input name="miles" type="number" placeholder="Miles" value="800" required />
+                <input name="commodity" placeholder="Commodity" value="General Freight" required />
+                <input name="rate_all_in" type="number" step="0.01" placeholder="All-in rate ($)" value="2500" required />
+                <select name="payment_terms" required>
+                  <option value="NET 30">NET 30 (default)</option><option value="NET 15">NET 15</option><option value="NET 45">NET 45</option><option value="QuickPay">QuickPay</option>
+                </select>
+
+                <select name="quickpay_available" required>
+                  <option value="false">QuickPay Available? No</option><option value="true">QuickPay Available? Yes</option>
+                </select>
+
+                <input name="detention_rate_per_hr" type="number" step="0.01" placeholder="Detention $/hr" value="75" required />
+                <input name="detention_after_hours" type="number" placeholder="Detention after (hours)" value="2" required />
+                <select name="appointment_type" required>
+                  <option value="FCFS">Appointment: FCFS</option><option value="Appt Required">Appointment: Appt Required</option>
+                </select>
+
+                <input name="accessorials" placeholder="Accessorials" value="None" required />
+                <input name="special_requirements" placeholder="Notes" value="None" required />
+              </div>
+              <div class="row" style="margin-top:12px">
+                <button class="btn green" type="submit">Post Load</button>
+                <a class="btn ghost" href="/loads">View Load Board</a>
+              </div>
+            </form>
+            ` : `
+              <div class="badge warn">Posting blocked: ${escapeHtml(gate.reason)}</div>
+              <div class="row" style="margin-top:10px">
+                <a class="btn green" href="/shipper/plans">Upgrade / Subscribe</a>
+              </div>
+            `}
+          </div>
+
+          <div class="card">
+            <h3 style="margin-top:0">Booking Requests</h3>
+            <div class="muted">Carrier requests → you accept/decline → load becomes BOOKED.</div>
+            <div class="hr"></div>
+            ${requests.rows.length ? requests.rows.map(r => `
+              <div class="load">
+                <div class="row" style="justify-content:space-between">
+                  <div><b>Load #${r.load_id}</b> ${escapeHtml(r.lane_from)} → ${escapeHtml(r.lane_to)}</div>
+                  <span class="badge ${r.request_status === "REQUESTED" ? "warn" : r.request_status === "ACCEPTED" ? "ok" : ""}">${escapeHtml(r.request_status)}</span>
+                </div>
+                <div class="muted">Carrier: ${escapeHtml(r.carrier_email)} • Compliance: ${escapeHtml(r.carrier_compliance || "PENDING")}</div>
+                ${r.request_status === "REQUESTED" ? `
+                  <div class="row" style="margin-top:10px">
+                    <form method="POST" action="/shipper/requests/${r.request_id}/accept"><button class="btn green" type="submit">Accept</button></form>
+                    <form method="POST" action="/shipper/requests/${r.request_id}/decline"><button class="btn ghost" type="submit">Decline</button></form>
+                  </div>` : ``}
+              </div>
+            `).join("") : `<div class="muted">No requests yet.</div>`}
+          </div>
+        </div>
+
+        <div class="card">
+          <h3 style="margin-top:0">Your Loads</h3>
+          <div class="hr"></div>
+          ${myLoads.rows.length ? myLoads.rows.map(l => loadCard(l, user)).join("") : `<div class="muted">No loads yet.</div>`}
+        </div>
+      `;
+      return res.send(layout({ title: "Dashboard", user, body }));
+    }
+
+    if (user.role === "CARRIER") {
+      const comp = await pool.query(`SELECT * FROM carriers_compliance WHERE carrier_id=$1`, [user.id]);
+      const c = comp.rows[0] || { status: "PENDING" };
+
+      const myReqs = await pool.query(`
+        SELECT lr.*, l.lane_from, l.lane_to, l.status as load_status
+        FROM load_requests lr
+        JOIN loads l ON l.id = lr.load_id
+        WHERE lr.carrier_id=$1
+        ORDER BY lr.created_at DESC
+        LIMIT 200
+      `, [user.id]);
+
+      const loads = await pool.query(`SELECT * FROM loads ORDER BY created_at DESC LIMIT 200`);
+
+      const body = `
+        <div class="grid">
+          <div class="card">
+            <div class="row" style="justify-content:space-between">
+              <div>
+                <h2 style="margin:0">Carrier Dashboard</h2>
+                <div class="muted">Upload compliance docs to earn Verified badge.</div>
+              </div>
+              <span class="badge ${c.status === "APPROVED" ? "ok" : "warn"}">Compliance: ${escapeHtml(c.status)}</span>
+            </div>
+
+            <div class="hr"></div>
+
+            <form method="POST" action="/carrier/compliance" enctype="multipart/form-data">
+              <div class="filters" style="grid-template-columns:1.2fr 1.2fr 1fr 1fr 1fr">
+                <input name="insurance_expires" placeholder="Insurance expires (YYYY-MM-DD)" value="${escapeHtml(c.insurance_expires || "")}" required />
+                <input type="file" name="insurance" accept="application/pdf,image/*" required />
+                <input type="file" name="authority" accept="application/pdf,image/*" required />
+                <input type="file" name="w9" accept="application/pdf,image/*" required />
+                <button class="btn green" type="submit">Upload Docs</button>
+              </div>
+              <div class="muted" style="margin-top:10px">Next: store docs on S3 (recommended for production).</div>
+            </form>
+          </div>
+
+          <div class="card">
+            <h3 style="margin-top:0">Your Requests</h3>
+            <div class="hr"></div>
+            ${myReqs.rows.length ? myReqs.rows.map(r => `
+              <div class="load">
+                <div class="row" style="justify-content:space-between">
+                  <div><b>Load #${r.load_id}</b> ${escapeHtml(r.lane_from)} → ${escapeHtml(r.lane_to)}</div>
+                  <span class="badge ${r.status === "REQUESTED" ? "warn" : r.status === "ACCEPTED" ? "ok" : ""}">${escapeHtml(r.status)}</span>
+                </div>
+                <div class="muted">Load status: ${escapeHtml(r.load_status)}</div>
+              </div>
+            `).join("") : `<div class="muted">No requests yet.</div>`}
+          </div>
+        </div>
+
+        <div class="card">
+          <h3 style="margin-top:0">Load Board</h3>
+          <div class="muted">Request a load → shipper accepts/declines → booked.</div>
+          <div class="hr"></div>
+          ${loads.rows.length ? loads.rows.map(l => loadCard(l, user, c.status)).join("") : `<div class="muted">No loads yet.</div>`}
+        </div>
+      `;
+      return res.send(layout({ title: "Carrier", user, body }));
+    }
+
+    // ADMIN
+    const pending = await pool.query(`
+      SELECT cc.*, u.email
+      FROM carriers_compliance cc
+      JOIN users u ON u.id = cc.carrier_id
+      WHERE cc.status='PENDING'
+      ORDER BY cc.updated_at DESC
       LIMIT 200
-    `, [user.id]);
+    `);
 
     const body = `
-      <div class="grid">
-        <div class="card">
-          <div class="row" style="justify-content:space-between">
-            <div>
-              <h2 style="margin:0">Shipper Dashboard</h2>
-              <div class="muted">All-in pricing. Transparent terms. Fast booking.</div>
+      <div class="card">
+        <h2 style="margin-top:0">Admin — Compliance Approvals</h2>
+        <div class="muted">Approve carriers to enable Direct Booking + Verified badge.</div>
+        <div class="hr"></div>
+        ${pending.rows.length ? pending.rows.map(p => `
+          <div class="load">
+            <div class="row" style="justify-content:space-between">
+              <div><b>${escapeHtml(p.email)}</b> • Insurance exp: ${escapeHtml(p.insurance_expires || "—")}</div>
+              <span class="badge warn">PENDING</span>
             </div>
-            <span class="badge ${billing.status === "ACTIVE" ? "ok" : "warn"}">Billing: ${escapeHtml(billing.status)}</span>
-          </div>
-
-          <div class="hr"></div>
-
-          <div class="row">
-            <span class="badge">Plan: ${escapeHtml(planLabel)}</span>
-            <span class="badge brand">${escapeHtml(limitText)}</span>
-            <a class="btn green" href="/shipper/plans">Manage Plan</a>
-          </div>
-
-          <div class="hr"></div>
-
-          <h3 style="margin:0 0 10px 0">Post a transparent load</h3>
-
-          ${gate.ok ? `
-          <form method="POST" action="/shipper/loads">
-            <div class="filters">
-              <input name="lane_from" placeholder="From (City, ST)" required />
-              <input name="lane_to" placeholder="To (City, ST)" required />
-              <input name="pickup_date" placeholder="Pickup date (YYYY-MM-DD)" required />
-              <input name="delivery_date" placeholder="Delivery date (YYYY-MM-DD)" required />
-              <select name="equipment" required>
-                <option>Dry Van</option><option>Reefer</option><option>Flatbed</option><option>Power Only</option><option>Stepdeck</option>
-              </select>
-
-              <input name="weight_lbs" type="number" placeholder="Weight (lbs)" value="42000" required />
-              <input name="miles" type="number" placeholder="Miles" value="800" required />
-              <input name="commodity" placeholder="Commodity" value="General Freight" required />
-              <input name="rate_all_in" type="number" step="0.01" placeholder="All-in rate ($)" value="2500" required />
-              <select name="payment_terms" required>
-                <option value="NET 30">NET 30 (default)</option><option value="NET 15">NET 15</option><option value="NET 45">NET 45</option><option value="QuickPay">QuickPay</option>
-              </select>
-
-              <select name="quickpay_available" required>
-                <option value="false">QuickPay Available? No</option><option value="true">QuickPay Available? Yes</option>
-              </select>
-
-              <input name="detention_rate_per_hr" type="number" step="0.01" placeholder="Detention $/hr" value="75" required />
-              <input name="detention_after_hours" type="number" placeholder="Detention after (hours)" value="2" required />
-              <select name="appointment_type" required>
-                <option value="FCFS">Appointment: FCFS</option><option value="Appt Required">Appointment: Appt Required</option>
-              </select>
-
-              <input name="accessorials" placeholder="Accessorials" value="None" required />
-              <input name="special_requirements" placeholder="Notes" value="None" required />
-            </div>
-            <div class="row" style="margin-top:12px">
-              <button class="btn green" type="submit">Post Load</button>
-              <a class="btn ghost" href="/loads">View Load Board</a>
-            </div>
-          </form>
-          ` : `
-            <div class="badge warn">Posting blocked: ${escapeHtml(gate.reason)}</div>
+            <div class="muted">Files: ${escapeHtml(p.insurance_filename||"—")}, ${escapeHtml(p.authority_filename||"—")}, ${escapeHtml(p.w9_filename||"—")}</div>
             <div class="row" style="margin-top:10px">
-              <a class="btn green" href="/shipper/plans">Upgrade / Subscribe</a>
+              <form method="POST" action="/admin/carriers/${p.carrier_id}/approve"><button class="btn green" type="submit">Approve</button></form>
+              <form method="POST" action="/admin/carriers/${p.carrier_id}/reject"><button class="btn ghost" type="submit">Reject</button></form>
             </div>
-          `}
-        </div>
-
-        <div class="card">
-          <h3 style="margin-top:0">Booking Requests</h3>
-          <div class="muted">Carrier requests → you accept/decline → load becomes BOOKED.</div>
-          <div class="hr"></div>
-          ${requests.rows.length ? requests.rows.map(r => `
-            <div class="load">
-              <div class="row" style="justify-content:space-between">
-                <div><b>Load #${r.load_id}</b> ${escapeHtml(r.lane_from)} → ${escapeHtml(r.lane_to)}</div>
-                <span class="badge ${r.request_status === "REQUESTED" ? "warn" : r.request_status === "ACCEPTED" ? "ok" : ""}">${escapeHtml(r.request_status)}</span>
-              </div>
-              <div class="muted">Carrier: ${escapeHtml(r.carrier_email)} • Compliance: ${escapeHtml(r.carrier_compliance || "PENDING")}</div>
-              ${r.request_status === "REQUESTED" ? `
-                <div class="row" style="margin-top:10px">
-                  <form method="POST" action="/shipper/requests/${r.request_id}/accept"><button class="btn green" type="submit">Accept</button></form>
-                  <form method="POST" action="/shipper/requests/${r.request_id}/decline"><button class="btn ghost" type="submit">Decline</button></form>
-                </div>` : ``}
-            </div>
-          `).join("") : `<div class="muted">No requests yet.</div>`}
-        </div>
-      </div>
-
-      <div class="card">
-        <h3 style="margin-top:0">Your Loads</h3>
-        <div class="hr"></div>
-        ${myLoads.rows.length ? myLoads.rows.map(l => loadCard(l, user)).join("") : `<div class="muted">No loads yet.</div>`}
+          </div>
+        `).join("") : `<div class="muted">No pending carriers.</div>`}
       </div>
     `;
-    return res.send(layout({ title: "Dashboard", user, body }));
+    return res.send(layout({ title: "Admin", user, body }));
+  } catch (e) {
+    console.error("Dashboard error:", e);
+    return res.status(500).send(
+      `<h1>Dashboard Error</h1><pre>${escapeHtml(String(e.message || e))}</pre>`
+    );
   }
-
-  if (user.role === "CARRIER") {
-    const comp = await pool.query(`SELECT * FROM carriers_compliance WHERE carrier_id=$1`, [user.id]);
-    const c = comp.rows[0] || { status: "PENDING" };
-
-    const myReqs = await pool.query(`
-      SELECT lr.*, l.lane_from, l.lane_to, l.status as load_status
-      FROM load_requests lr
-      JOIN loads l ON l.id = lr.load_id
-      WHERE lr.carrier_id=$1
-      ORDER BY lr.created_at DESC
-      LIMIT 200
-    `, [user.id]);
-
-    const loads = await pool.query(`SELECT * FROM loads ORDER BY created_at DESC LIMIT 200`);
-
-    const body = `
-      <div class="grid">
-        <div class="card">
-          <div class="row" style="justify-content:space-between">
-            <div>
-              <h2 style="margin:0">Carrier Dashboard</h2>
-              <div class="muted">Upload compliance docs to earn Verified badge.</div>
-            </div>
-            <span class="badge ${c.status === "APPROVED" ? "ok" : "warn"}">Compliance: ${escapeHtml(c.status)}</span>
-          </div>
-
-          <div class="hr"></div>
-
-          <form method="POST" action="/carrier/compliance" enctype="multipart/form-data">
-            <div class="filters" style="grid-template-columns:1.2fr 1.2fr 1fr 1fr 1fr">
-              <input name="insurance_expires" placeholder="Insurance expires (YYYY-MM-DD)" value="${escapeHtml(c.insurance_expires || "")}" required />
-              <input type="file" name="insurance" accept="application/pdf,image/*" required />
-              <input type="file" name="authority" accept="application/pdf,image/*" required />
-              <input type="file" name="w9" accept="application/pdf,image/*" required />
-              <button class="btn green" type="submit">Upload Docs</button>
-            </div>
-            <div class="muted" style="margin-top:10px">Next: store docs on S3 (recommended for production).</div>
-          </form>
-        </div>
-
-        <div class="card">
-          <h3 style="margin-top:0">Your Requests</h3>
-          <div class="hr"></div>
-          ${myReqs.rows.length ? myReqs.rows.map(r => `
-            <div class="load">
-              <div class="row" style="justify-content:space-between">
-                <div><b>Load #${r.load_id}</b> ${escapeHtml(r.lane_from)} → ${escapeHtml(r.lane_to)}</div>
-                <span class="badge ${r.status === "REQUESTED" ? "warn" : r.status === "ACCEPTED" ? "ok" : ""}">${escapeHtml(r.status)}</span>
-              </div>
-              <div class="muted">Load status: ${escapeHtml(r.load_status)}</div>
-            </div>
-          `).join("") : `<div class="muted">No requests yet.</div>`}
-        </div>
-      </div>
-
-      <div class="card">
-        <h3 style="margin-top:0">Load Board</h3>
-        <div class="muted">Request a load → shipper accepts/declines → booked.</div>
-        <div class="hr"></div>
-        ${loads.rows.length ? loads.rows.map(l => loadCard(l, user, c.status)).join("") : `<div class="muted">No loads yet.</div>`}
-      </div>
-    `;
-    return res.send(layout({ title: "Carrier", user, body }));
-  }
-
-  // ADMIN
-  const pending = await pool.query(`
-    SELECT cc.*, u.email
-    FROM carriers_compliance cc
-    JOIN users u ON u.id = cc.carrier_id
-    WHERE cc.status='PENDING'
-    ORDER BY cc.updated_at DESC
-    LIMIT 200
-  `);
-
-  const body = `
-    <div class="card">
-      <h2 style="margin-top:0">Admin — Compliance Approvals</h2>
-      <div class="muted">Approve carriers to enable Direct Booking + Verified badge.</div>
-      <div class="hr"></div>
-      ${pending.rows.length ? pending.rows.map(p => `
-        <div class="load">
-          <div class="row" style="justify-content:space-between">
-            <div><b>${escapeHtml(p.email)}</b> • Insurance exp: ${escapeHtml(p.insurance_expires || "—")}</div>
-            <span class="badge warn">PENDING</span>
-          </div>
-          <div class="muted">Files: ${escapeHtml(p.insurance_filename||"—")}, ${escapeHtml(p.authority_filename||"—")}, ${escapeHtml(p.w9_filename||"—")}</div>
-          <div class="row" style="margin-top:10px">
-            <form method="POST" action="/admin/carriers/${p.carrier_id}/approve"><button class="btn green" type="submit">Approve</button></form>
-            <form method="POST" action="/admin/carriers/${p.carrier_id}/reject"><button class="btn ghost" type="submit">Reject</button></form>
-          </div>
-        </div>
-      `).join("") : `<div class="muted">No pending carriers.</div>`}
-    </div>
-  `;
-  return res.send(layout({ title: "Admin", user, body }));
 });
 
 /* ---------- Shipper actions ---------- */
@@ -1340,8 +1350,16 @@ function loadCard(l, user, carrierBadge) {
   `;
 }
 
-/* ---------- Health ---------- */
-app.get("/health", (_, res) => res.json({ ok: true, stripeEnabled, smtpEnabled: !!getMailer() }));
+/* ---------- Health (DB-aware) ---------- */
+app.get("/health", async (_, res) => {
+  try {
+    await pool.query("SELECT 1");
+    res.json({ ok: true, stripeEnabled, db: "ok", smtpEnabled: !!getMailer() });
+  } catch (e) {
+    console.error("DB health failed:", e);
+    res.status(500).json({ ok: false, stripeEnabled, db: "error", error: String(e.message || e) });
+  }
+});
 
 initDb()
   .then(() => app.listen(PORT, "0.0.0.0", () => console.log("Server running on port", PORT)))
