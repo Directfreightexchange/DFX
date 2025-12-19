@@ -5,6 +5,7 @@ const jwt = require("jsonwebtoken");
 const { Pool } = require("pg");
 const multer = require("multer");
 const Stripe = require("stripe");
+const nodemailer = require("nodemailer");
 
 const app = express();
 
@@ -26,6 +27,13 @@ const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
 const STRIPE_PRICE_STARTER = process.env.STRIPE_PRICE_STARTER;
 const STRIPE_PRICE_GROWTH = process.env.STRIPE_PRICE_GROWTH;
 const STRIPE_PRICE_ENTERPRISE = process.env.STRIPE_PRICE_ENTERPRISE;
+
+// SMTP (optional, for email notifications)
+const SMTP_HOST = process.env.SMTP_HOST;
+const SMTP_PORT = Number(process.env.SMTP_PORT || "587");
+const SMTP_USER = process.env.SMTP_USER;
+const SMTP_PASS = process.env.SMTP_PASS;
+const SMTP_FROM = process.env.SMTP_FROM || "no-reply@directfreightexchange.com";
 
 if (!DATABASE_URL) return bootFail("Missing DATABASE_URL");
 if (!JWT_SECRET) return bootFail("Missing JWT_SECRET");
@@ -53,9 +61,9 @@ const upload = multer({
 });
 
 const PLANS = {
-  STARTER: { label: "Starter", price: 99, limit: 15, priceIdEnv: "STRIPE_PRICE_STARTER" },
-  GROWTH: { label: "Growth", price: 199, limit: 30, priceIdEnv: "STRIPE_PRICE_GROWTH" },
-  ENTERPRISE: { label: "Enterprise", price: 399, limit: -1, priceIdEnv: "STRIPE_PRICE_ENTERPRISE" }, // unlimited
+  STARTER: { label: "Starter", price: 99, limit: 15 },
+  GROWTH: { label: "Growth", price: 199, limit: 30 },
+  ENTERPRISE: { label: "Enterprise", price: 399, limit: -1 }, // unlimited
 };
 
 function planFromPriceId(priceId) {
@@ -118,74 +126,218 @@ function requireRole(role) {
   };
 }
 
+/* ---------------- Email (optional) ---------------- */
+let mailer = null;
+function getMailer() {
+  if (mailer) return mailer;
+  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS) return null;
+
+  mailer = nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: SMTP_PORT,
+    secure: SMTP_PORT === 465,
+    auth: { user: SMTP_USER, pass: SMTP_PASS },
+  });
+  return mailer;
+}
+
+async function sendEmail(to, subject, html) {
+  const t = getMailer();
+  if (!t) {
+    console.log("[email skipped] Missing SMTP_* env vars. Would send to:", to, subject);
+    return;
+  }
+  try {
+    await t.sendMail({ from: SMTP_FROM, to, subject, html });
+  } catch (e) {
+    console.error("Email send failed:", e);
+  }
+}
+
+/* ---------------- UI ---------------- */
+const DISCLAIMER_TEXT =
+  "Direct Freight Exchange is a technology platform and is not a broker or carrier. Users are responsible for verifying compliance, insurance, and payment terms.";
+
 function layout({ title, user, body }) {
+  const footer = `
+    <div class="footer">
+      <div class="footerTop">
+        <div class="footBrand">
+          <div class="footMark">DFX</div>
+          <div>
+            <div class="footName">Direct Freight Exchange</div>
+            <div class="footSub">Direct shipper ↔ carrier • Full transparency loads • Carriers free</div>
+          </div>
+        </div>
+        <div class="footLinks">
+          <a href="/terms">Terms / Disclaimer</a>
+          <a href="/health">Status</a>
+        </div>
+      </div>
+      <div class="footDisclaimer">${escapeHtml(DISCLAIMER_TEXT)}</div>
+    </div>
+  `;
+
   return `<!doctype html>
 <html><head>
 <meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>${escapeHtml(title)}</title>
 <style>
-:root{--bg:#070b14;--line:#233455;--text:#eef2ff;--muted:#b7c2dd;--blue:#60a5fa;--orange:#f59e0b;--ok:#22c55e;--warn:#fbbf24;--shadow:0 18px 60px rgba(0,0,0,.40)}
+:root{
+  --bg:#050607;
+  --panel:#0b0f10;
+  --card:#0d1412;
+  --line:rgba(255,255,255,.10);
+  --text:#eef7f1;
+  --muted:rgba(238,247,241,.68);
+
+  --green:#22c55e;
+  --green2:#16a34a;
+  --lime:#a3e635;
+
+  --shadow:0 18px 60px rgba(0,0,0,.52);
+  --radius:18px;
+}
 *{box-sizing:border-box}
-body{margin:0;color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;
-background:radial-gradient(950px 520px at 14% -8%, rgba(245,158,11,.24), transparent 55%),
-radial-gradient(950px 520px at 92% 0%, rgba(96,165,250,.24), transparent 55%), var(--bg)}
+body{
+  margin:0; color:var(--text);
+  font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;
+  background:
+    radial-gradient(900px 520px at 12% -8%, rgba(34,197,94,.18), transparent 55%),
+    radial-gradient(900px 520px at 92% 0%, rgba(163,230,53,.12), transparent 55%),
+    linear-gradient(180deg, rgba(34,197,94,.08), transparent 45%),
+    var(--bg);
+}
 .wrap{max-width:1200px;margin:0 auto;padding:22px}
-a{color:var(--blue);text-decoration:none} a:hover{text-decoration:underline}
-.nav{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:center;
-padding:14px 16px;border:1px solid var(--line);border-radius:20px;background:rgba(15,27,51,.72);
-backdrop-filter: blur(10px);box-shadow:var(--shadow)}
+a{color:var(--lime);text-decoration:none} a:hover{text-decoration:underline}
+
+.nav{
+  display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:center;
+  padding:14px 16px;border:1px solid var(--line);border-radius:20px;
+  background:rgba(13,20,18,.70);backdrop-filter: blur(10px);box-shadow:var(--shadow);
+  position:sticky; top:14px; z-index:20;
+}
 .brand{display:flex;gap:12px;align-items:center}
-.mark{width:46px;height:46px;border-radius:16px;border:1px solid rgba(255,255,255,.10);
-background:linear-gradient(135deg, rgba(245,158,11,.95), rgba(96,165,250,.95));display:grid;place-items:center}
+.mark{
+  width:46px;height:46px;border-radius:16px;border:1px solid rgba(255,255,255,.10);
+  background: linear-gradient(135deg, rgba(34,197,94,.95), rgba(163,230,53,.65));
+  display:grid;place-items:center; font-weight:1000; color:#07120b;
+}
 .sub{color:var(--muted);font-size:12px}
 .right{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
-.pill{padding:7px 10px;border-radius:999px;border:1px solid var(--line);background:rgba(11,20,38,.85);color:var(--muted);font-size:12px}
-.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:10px 14px;border-radius:12px;border:1px solid var(--line);
-background:rgba(11,20,38,.86);color:var(--text);cursor:pointer}
-.btn.orange{border:none;background:linear-gradient(135deg, rgba(245,158,11,.98), rgba(251,146,60,.82));color:#111827;font-weight:900}
-.btn.blue{border:none;background:linear-gradient(135deg, rgba(37,99,235,.98), rgba(96,165,250,.85));color:#0b1020;font-weight:900}
-.card{margin-top:16px;border:1px solid var(--line);border-radius:18px;background:rgba(15,27,51,.72);
-backdrop-filter: blur(10px);box-shadow:var(--shadow);padding:18px}
-.grid{display:grid;gap:16px;grid-template-columns:1.1fr .9fr;margin-top:16px}
-@media(max-width:980px){.grid{grid-template-columns:1fr}}
+.pill{
+  padding:7px 10px;border-radius:999px;border:1px solid var(--line);
+  background:rgba(6,8,9,.65);color:var(--muted);font-size:12px
+}
+.btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:8px;
+  padding:10px 14px;border-radius:12px;border:1px solid var(--line);
+  background:rgba(6,8,9,.65);color:var(--text);cursor:pointer;
+  transition: transform .08s ease, filter .12s ease;
+}
+.btn:hover{filter:brightness(1.06)}
+.btn:active{transform:translateY(1px)}
+.btn.green{
+  border:none;
+  background: linear-gradient(135deg, rgba(34,197,94,.98), rgba(163,230,53,.70));
+  color:#06130b; font-weight:1000;
+  box-shadow: 0 18px 55px rgba(34,197,94,.18);
+}
+.btn.ghost{
+  border:1px solid rgba(163,230,53,.22);
+  background:rgba(6,8,9,.55);
+  color:var(--text);
+}
+.card{
+  margin-top:16px;border:1px solid var(--line);border-radius:var(--radius);
+  background:rgba(13,20,18,.70);backdrop-filter: blur(10px);box-shadow:var(--shadow);padding:18px
+}
+.hero{
+  margin-top:16px;border:1px solid var(--line);border-radius:var(--radius);
+  background: linear-gradient(180deg, rgba(13,20,18,.78), rgba(6,8,9,.62));
+  backdrop-filter: blur(10px);box-shadow:var(--shadow);padding:20px;position:relative;overflow:hidden;
+}
+.hero:before{
+  content:""; position:absolute; inset:-2px;
+  background:
+    radial-gradient(520px 240px at 14% 0%, rgba(34,197,94,.22), transparent 60%),
+    radial-gradient(520px 240px at 92% 0%, rgba(163,230,53,.14), transparent 60%);
+  pointer-events:none;
+}
+.heroInner{position:relative}
+.title{font-size:44px;line-height:1.03;margin:0 0 10px 0;letter-spacing:-.5px}
 .muted{color:var(--muted)}
-.hr{height:1px;background:rgba(35,52,85,.9);margin:14px 0;border:0}
-input,select,textarea{width:100%;padding:12px;border-radius:12px;border:1px solid var(--line);background:rgba(11,20,38,.92);color:var(--text);outline:none}
+.hr{height:1px;background:rgba(255,255,255,.10);margin:14px 0;border:0}
+
+.grid{display:grid;gap:16px;grid-template-columns:1.1fr .9fr;margin-top:16px}
+@media(max-width:980px){.grid{grid-template-columns:1fr}.nav{position:static}.title{font-size:38px}}
+
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
 .filters{display:grid;gap:10px;grid-template-columns:1.2fr 1.2fr 1fr 1fr 1fr}
 @media(max-width:980px){.filters{grid-template-columns:1fr 1fr}}
-.badge{display:inline-flex;gap:8px;align-items:center;padding:6px 10px;border-radius:999px;border:1px solid var(--line);
-background:rgba(11,20,38,.86);color:var(--muted);font-size:12px}
-.badge.ok{border-color:rgba(34,197,94,.35);background:rgba(34,197,94,.10);color:rgba(220,255,240,.92)}
-.badge.warn{border-color:rgba(251,191,36,.35);background:rgba(251,191,36,.10);color:rgba(255,250,220,.92)}
-.badge.orange{border-color:rgba(245,158,11,.35);background:rgba(245,158,11,.10);color:rgba(255,243,220,.92)}
-.load{margin-top:12px;padding:14px;border-radius:16px;border:1px solid rgba(255,255,255,.08);background:rgba(11,20,38,.78)}
+input,select,textarea{
+  width:100%;padding:12px;border-radius:12px;border:1px solid var(--line);
+  background:rgba(6,8,9,.72);color:var(--text);outline:none
+}
+textarea{min-height:86px;resize:vertical}
+input:focus,select:focus,textarea:focus{border-color:rgba(34,197,94,.55)}
+
+.badge{
+  display:inline-flex;gap:8px;align-items:center;padding:6px 10px;border-radius:999px;
+  border:1px solid var(--line);background:rgba(6,8,9,.62);color:var(--muted);font-size:12px
+}
+.badge.ok{border-color:rgba(34,197,94,.30);background:rgba(34,197,94,.10);color:rgba(219,255,236,.92)}
+.badge.warn{border-color:rgba(163,230,53,.25);background:rgba(163,230,53,.08);color:rgba(240,255,219,.90)}
+.badge.brand{border-color:rgba(34,197,94,.35);background:rgba(34,197,94,.08);color:rgba(219,255,236,.92)}
+.load{margin-top:12px;padding:14px;border-radius:16px;border:1px solid rgba(255,255,255,.08);background:rgba(6,8,9,.62)}
 .loadTop{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
-.lane{font-weight:900}
+.lane{font-weight:1000}
 .kv{display:grid;grid-template-columns:210px 1fr;gap:6px;margin-top:10px}
 @media(max-width:780px){.kv{grid-template-columns:1fr}}
 .k{color:var(--muted)}
-.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+
+.footer{
+  margin-top:16px;
+  border:1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(6,8,9,.62);
+  backdrop-filter: blur(10px);
+  box-shadow: var(--shadow);
+  padding:16px;
+}
+.footerTop{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:center}
+.footBrand{display:flex;gap:12px;align-items:center}
+.footMark{
+  width:44px;height:44px;border-radius:16px;border:1px solid rgba(255,255,255,.10);
+  background: linear-gradient(135deg, rgba(34,197,94,.95), rgba(163,230,53,.65));
+  display:grid;place-items:center; font-weight:1000; color:#06130b;
+}
+.footName{font-weight:1000}
+.footSub{font-size:12px;color:var(--muted)}
+.footLinks{display:flex;gap:14px;flex-wrap:wrap}
+.footDisclaimer{margin-top:10px;color:var(--muted);font-size:12px;line-height:1.35}
 </style>
 </head>
 <body><div class="wrap">
 <div class="nav">
   <div class="brand">
-    <div class="mark">🚚</div>
+    <div class="mark">DFX</div>
     <div>
-      <div style="font-weight:900">Direct Freight Exchange</div>
+      <div style="font-weight:1000">Direct Freight Exchange</div>
       <div class="sub">Direct shipper ↔ carrier • Full transparency loads • Carriers free</div>
     </div>
   </div>
   <div class="right">
-    <a class="btn" href="/">Home</a>
-    <a class="btn" href="/loads">Load Board</a>
+    <a class="btn ghost" href="/">Home</a>
+    <a class="btn ghost" href="/loads">Load Board</a>
     ${user
       ? `<span class="pill">${escapeHtml(user.role)}</span><span class="pill">${escapeHtml(user.email)}</span>
-         <a class="btn blue" href="/dashboard">Dashboard</a><a class="btn" href="/logout">Logout</a>`
-      : `<a class="btn" href="/signup">Sign up</a><a class="btn blue" href="/login">Login</a>`}
+         <a class="btn green" href="/dashboard">Dashboard</a><a class="btn ghost" href="/logout">Logout</a>`
+      : `<a class="btn ghost" href="/signup">Sign up</a><a class="btn green" href="/login">Login</a>`}
   </div>
 </div>
 ${body}
+${footer}
 </div></body></html>`;
 }
 
@@ -283,7 +435,6 @@ async function upsertBillingFromSubscription({ shipperId, customerId, subscripti
 
   const limit = planDef ? planDef.limit : 0;
 
-  // Keep usage month consistent and reset if needed
   const nowMonth = monthKey();
   const existing = await pool.query(`SELECT usage_month, loads_used FROM shippers_billing WHERE shipper_id=$1`, [shipperId]);
   const prevMonth = existing.rows[0]?.usage_month || "";
@@ -309,6 +460,32 @@ async function upsertBillingFromSubscription({ shipperId, customerId, subscripti
   );
 }
 
+/* ---------- Legal ---------- */
+app.get("/terms", (req, res) => {
+  const user = getUser(req);
+  const body = `
+    <div class="card">
+      <h2 style="margin-top:0">Terms / Disclaimer</h2>
+      <div class="hr"></div>
+      <div class="muted" style="line-height:1.55">
+        <p><b>Platform Disclaimer</b></p>
+        <p>${escapeHtml(DISCLAIMER_TEXT)}</p>
+
+        <p><b>User Responsibilities</b></p>
+        <ul>
+          <li>Carriers are responsible for maintaining valid authority, insurance, and compliance documentation.</li>
+          <li>Shippers are responsible for verifying carrier compliance, insurance, and suitability for the load.</li>
+          <li>All parties are responsible for reviewing and agreeing to payment terms, detention terms, accessorials, and load requirements.</li>
+        </ul>
+
+        <p><b>No Legal / Financial Advice</b></p>
+        <p>DFX does not provide legal, regulatory, insurance, or financial advice. Consult qualified professionals as needed.</p>
+      </div>
+    </div>
+  `;
+  res.send(layout({ title: "Terms", user, body }));
+});
+
 /* ---------- Stripe routes ---------- */
 app.get("/shipper/plans", requireAuth, requireRole("SHIPPER"), async (req, res) => {
   const user = req.user;
@@ -323,17 +500,18 @@ app.get("/shipper/plans", requireAuth, requireRole("SHIPPER"), async (req, res) 
   const status = b?.status || "INACTIVE";
 
   const usageText = (limit === -1) ? `Unlimited` : `${used} / ${limit} used this month`;
+
   const body = `
     <div class="card">
       <h2 style="margin-top:0">Shipper Plans</h2>
-      <div class="muted">Posting is available only while your subscription is ACTIVE.</div>
+      <div class="muted">Immediate upgrades (prorated). Posting requires ACTIVE subscription.</div>
       <div class="hr"></div>
 
       <div class="row">
         <span class="badge ${status === "ACTIVE" ? "ok" : "warn"}">Status: ${escapeHtml(status)}</span>
         <span class="badge">Plan: ${escapeHtml(plan || "None")}</span>
         <span class="badge">Month: ${escapeHtml(usageMonth)}</span>
-        <span class="badge orange">${escapeHtml(usageText)}</span>
+        <span class="badge brand">${escapeHtml(usageText)}</span>
       </div>
 
       ${!stripeEnabled ? `
@@ -361,17 +539,12 @@ app.get("/shipper/plans", requireAuth, requireRole("SHIPPER"), async (req, res) 
                   : `
                     <form method="POST" action="/shipper/plan">
                       <input type="hidden" name="plan" value="${p}">
-                      <button class="btn orange" type="submit">${status === "ACTIVE" ? "Switch immediately" : "Subscribe"}</button>
+                      <button class="btn green" type="submit">${status === "ACTIVE" ? "Switch immediately" : "Subscribe"}</button>
                     </form>
                   `}
               </div>
             `;
           }).join("")}
-        </div>
-
-        <div class="hr"></div>
-        <div class="muted">
-          Immediate switching uses Stripe proration (you may be charged/credited immediately depending on timing).
         </div>
       `}
     </div>
@@ -389,7 +562,6 @@ app.post("/shipper/plan", requireAuth, requireRole("SHIPPER"), async (req, res) 
   const bill = await pool.query(`SELECT * FROM shippers_billing WHERE shipper_id=$1`, [req.user.id]);
   const b = bill.rows[0];
 
-  // If no active subscription, start checkout
   if (!b?.stripe_subscription_id || b.status !== "ACTIVE") {
     const session = await stripe.checkout.sessions.create({
       mode: "subscription",
@@ -402,9 +574,7 @@ app.post("/shipper/plan", requireAuth, requireRole("SHIPPER"), async (req, res) 
     return res.redirect(303, session.url);
   }
 
-  // Otherwise: immediate plan switch (prorated)
   const sub = await stripe.subscriptions.retrieve(b.stripe_subscription_id);
-
   const item = sub.items?.data?.[0];
   if (!item) return res.status(400).send("Subscription item not found.");
 
@@ -413,7 +583,6 @@ app.post("/shipper/plan", requireAuth, requireRole("SHIPPER"), async (req, res) 
     proration_behavior: "create_prorations",
   });
 
-  // DB will update via webhook; but we can optimistically update plan/limit to reflect UI fast
   const planDef = PLANS[plan];
   await pool.query(
     `UPDATE shippers_billing SET plan=$1, monthly_limit=$2, updated_at=NOW() WHERE shipper_id=$3`,
@@ -435,10 +604,8 @@ app.post("/stripe/webhook", async (req, res) => {
   }
 
   try {
-    // On checkout success, mark shipper active + plan
     if (event.type === "checkout.session.completed") {
       const session = event.data.object;
-
       const shipperId = Number(session.metadata?.shipper_id);
       const customerId = session.customer;
       const subscriptionId = session.subscription;
@@ -456,7 +623,6 @@ app.post("/stripe/webhook", async (req, res) => {
       }
     }
 
-    // Keep billing in sync whenever subscription changes
     if (
       event.type === "customer.subscription.created" ||
       event.type === "customer.subscription.updated" ||
@@ -467,22 +633,18 @@ app.post("/stripe/webhook", async (req, res) => {
       const customerId = sub.customer;
       const priceId = sub.items?.data?.[0]?.price?.id;
 
-      // Map by subscription id → shipper
       const row = await pool.query(
         `SELECT shipper_id FROM shippers_billing WHERE stripe_subscription_id=$1`,
         [subscriptionId]
       );
-      const shipperId = row.rows[0]?.shipper_id;
+      const shipperId =
+        row.rows[0]?.shipper_id ||
+        (await pool.query(`SELECT shipper_id FROM shippers_billing WHERE stripe_customer_id=$1`, [customerId])).rows[0]
+          ?.shipper_id;
 
-      // If we can't find by subscription id (rare), try by customer id
-      const shipperId2 = shipperId
-        ? shipperId
-        : (await pool.query(`SELECT shipper_id FROM shippers_billing WHERE stripe_customer_id=$1`, [customerId])).rows[0]
-            ?.shipper_id;
-
-      if (shipperId2) {
+      if (shipperId) {
         await upsertBillingFromSubscription({
-          shipperId: shipperId2,
+          shipperId,
           customerId,
           subscriptionId,
           subStatus: sub.status,
@@ -506,6 +668,8 @@ app.get("/signup", (req, res) => {
     user,
     body: `<div class="card">
       <h2 style="margin-top:0">Sign up</h2>
+      <div class="muted">Carriers are free. Shippers subscribe to post loads.</div>
+      <div class="hr"></div>
       <form method="POST" action="/signup">
         <div class="filters" style="grid-template-columns:1.2fr 1.2fr 1fr 1fr 1fr">
           <input name="email" type="email" placeholder="Email" required />
@@ -514,8 +678,8 @@ app.get("/signup", (req, res) => {
             <option value="SHIPPER">Shipper</option>
             <option value="CARRIER">Carrier (free)</option>
           </select>
-          <button class="btn orange" type="submit">Create</button>
-          <a class="btn" href="/login">Login</a>
+          <button class="btn green" type="submit">Create</button>
+          <a class="btn ghost" href="/login">Login</a>
         </div>
       </form>
     </div>`
@@ -568,9 +732,9 @@ app.get("/login", (req, res) => {
         <div class="filters" style="grid-template-columns:1.2fr 1.2fr 1fr 1fr 1fr">
           <input name="email" type="email" placeholder="Email" required />
           <input name="password" type="password" placeholder="Password" required />
-          <button class="btn blue" type="submit">Login</button>
-          <a class="btn" href="/signup">Create</a>
-          <a class="btn" href="/loads">Load Board</a>
+          <button class="btn green" type="submit">Login</button>
+          <a class="btn ghost" href="/signup">Create</a>
+          <a class="btn ghost" href="/loads">Load Board</a>
         </div>
       </form>
     </div>`
@@ -596,24 +760,68 @@ app.post("/login", async (req, res) => {
 
 app.get("/logout", (req, res) => { res.clearCookie("dfx_token"); res.redirect("/"); });
 
-/* ---------- Home ---------- */
+/* ---------- Home (polished hero + badges) ---------- */
 app.get("/", (req, res) => {
   const user = getUser(req);
-  res.send(layout({
-    title: "DFX",
-    user,
-    body: `<div class="card">
-      <span class="badge orange">Default: Fully transparent loads</span>
-      <h2 style="margin:10px 0 6px 0">Connect carriers directly with shippers — no hidden load details.</h2>
-      <div class="muted">All-in rate • terms • detention • accessorials • notes. Carriers are free. Shippers subscribe to post.</div>
-      <div class="hr"></div>
-      <div class="row">
-        <a class="btn orange" href="${user ? "/dashboard" : "/signup"}">${user ? "Dashboard" : "Create account"}</a>
-        <a class="btn blue" href="/loads">Browse Load Board</a>
-        ${user?.role === "SHIPPER" ? `<a class="btn" href="/shipper/plans">Plans</a>` : ``}
+
+  const body = `
+    <div class="hero">
+      <div class="heroInner">
+        <div class="row">
+          <span class="badge brand">All-In Pricing</span>
+          <span class="badge brand">Carrier Verified</span>
+          <span class="badge brand">Direct Booking</span>
+        </div>
+
+        <h2 class="title" style="margin-top:12px">No hidden rates. No phone calls. No broker games.</h2>
+        <div class="muted" style="max-width:880px">
+          DFX connects shippers and carriers directly with fully transparent loads:
+          <b>all-in rate</b>, <b>payment terms</b>, <b>detention</b>, <b>accessorials</b>, appointment type, and notes —
+          visible up front so carriers can commit fast and shippers can book with confidence.
+        </div>
+
+        <div class="hr"></div>
+
+        <div class="row">
+          <a class="btn green" href="${user ? "/dashboard" : "/signup"}">${user ? "Go to Dashboard" : "Create account"}</a>
+          <a class="btn ghost" href="/loads">Browse Load Board</a>
+          <a class="btn ghost" href="/terms">Terms / Disclaimer</a>
+        </div>
       </div>
-    </div>`
-  }));
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h3 style="margin-top:0">For Shippers</h3>
+        <div class="muted">
+          Post loads with everything included — rate, terms, detention, accessorials — so carriers can book faster.
+          Choose a plan based on your monthly volume.
+        </div>
+        <div class="hr"></div>
+        <div class="row">
+          <span class="badge ok">Starter: 15 loads</span>
+          <span class="badge ok">Growth: 30 loads</span>
+          <span class="badge ok">Enterprise: Unlimited</span>
+          <a class="btn green" href="/shipper/plans">View Plans</a>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 style="margin-top:0">For Carriers</h3>
+        <div class="muted">
+          Free access to transparent loads. Upload compliance docs once, get verified, and request loads directly.
+        </div>
+        <div class="hr"></div>
+        <div class="row">
+          <span class="badge brand">Verified badge</span>
+          <span class="badge brand">Request-to-Book</span>
+          <span class="badge brand">Transparent terms</span>
+        </div>
+      </div>
+    </div>
+  `;
+
+  res.send(layout({ title: "DFX", user, body }));
 });
 
 /* ---------- Billing gate + monthly usage ---------- */
@@ -626,8 +834,7 @@ async function getAndNormalizeBilling(shipperId) {
        VALUES ($1,'INACTIVE',NULL,0,$2,0)`,
       [shipperId, monthKey()]
     );
-    const r2 = await pool.query(`SELECT * FROM shippers_billing WHERE shipper_id=$1`, [shipperId]);
-    b = r2.rows[0];
+    b = (await pool.query(`SELECT * FROM shippers_billing WHERE shipper_id=$1`, [shipperId])).rows[0];
   }
 
   const nowM = monthKey();
@@ -644,17 +851,14 @@ async function getAndNormalizeBilling(shipperId) {
 }
 
 function postingAllowed(billing) {
-  if (!stripeEnabled) {
-    // If Stripe not configured, allow posting so you can keep testing
-    return { ok: true, reason: null };
-  }
+  if (!stripeEnabled) return { ok: true, reason: null }; // allow dev/testing if Stripe not configured
   if (billing.status !== "ACTIVE") return { ok: false, reason: "Subscription required (not ACTIVE)." };
-  if (billing.monthly_limit === -1) return { ok: true, reason: null }; // unlimited
+  if (billing.monthly_limit === -1) return { ok: true, reason: null };
   if (billing.loads_used >= billing.monthly_limit) return { ok: false, reason: "Monthly posting limit reached." };
   return { ok: true, reason: null };
 }
 
-/* ---------- Dashboards ---------- */
+/* ---------- Dashboards (unchanged logic, UI uses new theme) ---------- */
 app.get("/dashboard", requireAuth, async (req, res) => {
   const user = req.user;
 
@@ -671,6 +875,7 @@ app.get("/dashboard", requireAuth, async (req, res) => {
 
     const requests = await pool.query(`
       SELECT lr.id as request_id, lr.status as request_status, lr.created_at,
+             lr.carrier_id,
              l.id as load_id, l.lane_from, l.lane_to,
              u.email as carrier_email,
              cc.status as carrier_compliance
@@ -683,15 +888,13 @@ app.get("/dashboard", requireAuth, async (req, res) => {
       LIMIT 200
     `, [user.id]);
 
-    res.send(layout({
-      title: "Shipper Dashboard",
-      user,
-      body: `<div class="grid">
+    const body = `
+      <div class="grid">
         <div class="card">
           <div class="row" style="justify-content:space-between">
             <div>
               <h2 style="margin:0">Shipper Dashboard</h2>
-              <div class="muted">Plans: Starter (15) • Growth (30) • Enterprise (Unlimited)</div>
+              <div class="muted">All-in pricing. Transparent terms. Fast booking.</div>
             </div>
             <span class="badge ${billing.status === "ACTIVE" ? "ok" : "warn"}">Billing: ${escapeHtml(billing.status)}</span>
           </div>
@@ -700,8 +903,8 @@ app.get("/dashboard", requireAuth, async (req, res) => {
 
           <div class="row">
             <span class="badge">Plan: ${escapeHtml(planLabel)}</span>
-            <span class="badge orange">${escapeHtml(limitText)}</span>
-            <a class="btn blue" href="/shipper/plans">Manage Plan</a>
+            <span class="badge brand">${escapeHtml(limitText)}</span>
+            <a class="btn green" href="/shipper/plans">Manage Plan</a>
           </div>
 
           <div class="hr"></div>
@@ -741,14 +944,14 @@ app.get("/dashboard", requireAuth, async (req, res) => {
               <input name="special_requirements" placeholder="Notes" value="None" required />
             </div>
             <div class="row" style="margin-top:12px">
-              <button class="btn orange" type="submit">Post Load</button>
-              <a class="btn blue" href="/loads">View Load Board</a>
+              <button class="btn green" type="submit">Post Load</button>
+              <a class="btn ghost" href="/loads">View Load Board</a>
             </div>
           </form>
           ` : `
             <div class="badge warn">Posting blocked: ${escapeHtml(gate.reason)}</div>
             <div class="row" style="margin-top:10px">
-              <a class="btn orange" href="/shipper/plans">Upgrade / Subscribe</a>
+              <a class="btn green" href="/shipper/plans">Upgrade / Subscribe</a>
             </div>
           `}
         </div>
@@ -766,8 +969,8 @@ app.get("/dashboard", requireAuth, async (req, res) => {
               <div class="muted">Carrier: ${escapeHtml(r.carrier_email)} • Compliance: ${escapeHtml(r.carrier_compliance || "PENDING")}</div>
               ${r.request_status === "REQUESTED" ? `
                 <div class="row" style="margin-top:10px">
-                  <form method="POST" action="/shipper/requests/${r.request_id}/accept"><button class="btn orange" type="submit">Accept</button></form>
-                  <form method="POST" action="/shipper/requests/${r.request_id}/decline"><button class="btn" type="submit">Decline</button></form>
+                  <form method="POST" action="/shipper/requests/${r.request_id}/accept"><button class="btn green" type="submit">Accept</button></form>
+                  <form method="POST" action="/shipper/requests/${r.request_id}/decline"><button class="btn ghost" type="submit">Decline</button></form>
                 </div>` : ``}
             </div>
           `).join("") : `<div class="muted">No requests yet.</div>`}
@@ -778,9 +981,9 @@ app.get("/dashboard", requireAuth, async (req, res) => {
         <h3 style="margin-top:0">Your Loads</h3>
         <div class="hr"></div>
         ${myLoads.rows.length ? myLoads.rows.map(l => loadCard(l, user)).join("") : `<div class="muted">No loads yet.</div>`}
-      </div>`
-    }));
-    return;
+      </div>
+    `;
+    return res.send(layout({ title: "Dashboard", user, body }));
   }
 
   if (user.role === "CARRIER") {
@@ -798,10 +1001,8 @@ app.get("/dashboard", requireAuth, async (req, res) => {
 
     const loads = await pool.query(`SELECT * FROM loads ORDER BY created_at DESC LIMIT 200`);
 
-    res.send(layout({
-      title: "Carrier Dashboard",
-      user,
-      body: `<div class="grid">
+    const body = `
+      <div class="grid">
         <div class="card">
           <div class="row" style="justify-content:space-between">
             <div>
@@ -819,9 +1020,9 @@ app.get("/dashboard", requireAuth, async (req, res) => {
               <input type="file" name="insurance" accept="application/pdf,image/*" required />
               <input type="file" name="authority" accept="application/pdf,image/*" required />
               <input type="file" name="w9" accept="application/pdf,image/*" required />
-              <button class="btn orange" type="submit">Upload Docs</button>
+              <button class="btn green" type="submit">Upload Docs</button>
             </div>
-            <div class="muted" style="margin-top:10px">Next upgrade: store docs safely on S3 (recommended for production).</div>
+            <div class="muted" style="margin-top:10px">Next: store docs on S3 (recommended for production).</div>
           </form>
         </div>
 
@@ -845,9 +1046,9 @@ app.get("/dashboard", requireAuth, async (req, res) => {
         <div class="muted">Request a load → shipper accepts/declines → booked.</div>
         <div class="hr"></div>
         ${loads.rows.length ? loads.rows.map(l => loadCard(l, user, c.status)).join("") : `<div class="muted">No loads yet.</div>`}
-      </div>`
-    }));
-    return;
+      </div>
+    `;
+    return res.send(layout({ title: "Carrier", user, body }));
   }
 
   // ADMIN
@@ -860,12 +1061,10 @@ app.get("/dashboard", requireAuth, async (req, res) => {
     LIMIT 200
   `);
 
-  res.send(layout({
-    title: "Admin",
-    user,
-    body: `<div class="card">
+  const body = `
+    <div class="card">
       <h2 style="margin-top:0">Admin — Compliance Approvals</h2>
-      <div class="muted">Approve carriers to display Verified badge + enable booking requests.</div>
+      <div class="muted">Approve carriers to enable Direct Booking + Verified badge.</div>
       <div class="hr"></div>
       ${pending.rows.length ? pending.rows.map(p => `
         <div class="load">
@@ -875,13 +1074,14 @@ app.get("/dashboard", requireAuth, async (req, res) => {
           </div>
           <div class="muted">Files: ${escapeHtml(p.insurance_filename||"—")}, ${escapeHtml(p.authority_filename||"—")}, ${escapeHtml(p.w9_filename||"—")}</div>
           <div class="row" style="margin-top:10px">
-            <form method="POST" action="/admin/carriers/${p.carrier_id}/approve"><button class="btn orange" type="submit">Approve</button></form>
-            <form method="POST" action="/admin/carriers/${p.carrier_id}/reject"><button class="btn" type="submit">Reject</button></form>
+            <form method="POST" action="/admin/carriers/${p.carrier_id}/approve"><button class="btn green" type="submit">Approve</button></form>
+            <form method="POST" action="/admin/carriers/${p.carrier_id}/reject"><button class="btn ghost" type="submit">Reject</button></form>
           </div>
         </div>
       `).join("") : `<div class="muted">No pending carriers.</div>`}
-    </div>`
-  }));
+    </div>
+  `;
+  return res.send(layout({ title: "Admin", user, body }));
 });
 
 /* ---------- Shipper actions ---------- */
@@ -925,12 +1125,8 @@ app.post("/shipper/loads", requireAuth, requireRole("SHIPPER"), async (req, res)
     ]
   );
 
-  // Increment usage only if not unlimited
   if (billing.monthly_limit !== -1) {
-    await pool.query(
-      `UPDATE shippers_billing SET loads_used = loads_used + 1, updated_at=NOW() WHERE shipper_id=$1`,
-      [req.user.id]
-    );
+    await pool.query(`UPDATE shippers_billing SET loads_used = loads_used + 1, updated_at=NOW() WHERE shipper_id=$1`, [req.user.id]);
   }
 
   res.redirect("/dashboard");
@@ -939,7 +1135,7 @@ app.post("/shipper/loads", requireAuth, requireRole("SHIPPER"), async (req, res)
 app.post("/shipper/requests/:id/accept", requireAuth, requireRole("SHIPPER"), async (req, res) => {
   const requestId = Number(req.params.id);
   const r = await pool.query(`
-    SELECT lr.*, l.shipper_id, l.status as load_status
+    SELECT lr.*, l.shipper_id, l.status as load_status, l.lane_from, l.lane_to
     FROM load_requests lr
     JOIN loads l ON l.id = lr.load_id
     WHERE lr.id=$1
@@ -953,13 +1149,31 @@ app.post("/shipper/requests/:id/accept", requireAuth, requireRole("SHIPPER"), as
   await pool.query(`UPDATE load_requests SET status='DECLINED' WHERE load_id=$1 AND id<>$2`, [row.load_id, requestId]);
   await pool.query(`UPDATE loads SET status='BOOKED', booked_carrier_id=$1 WHERE id=$2`, [row.carrier_id, row.load_id]);
 
+  // Email notifications
+  const carrierEmail = (await pool.query(`SELECT email FROM users WHERE id=$1`, [row.carrier_id])).rows[0]?.email;
+  const shipperEmail = req.user.email;
+
+  await sendEmail(
+    shipperEmail,
+    `DFX Booking Confirmed • Load #${row.load_id}`,
+    `<p><b>Booking confirmed.</b></p><p>Load #${row.load_id}: ${escapeHtml(row.lane_from)} → ${escapeHtml(row.lane_to)}</p><p>Status: BOOKED</p>`
+  );
+
+  if (carrierEmail) {
+    await sendEmail(
+      carrierEmail,
+      `DFX Request Accepted • Load #${row.load_id}`,
+      `<p><b>Your request was accepted.</b></p><p>Load #${row.load_id}: ${escapeHtml(row.lane_from)} → ${escapeHtml(row.lane_to)}</p><p>Status: BOOKED</p>`
+    );
+  }
+
   res.redirect("/dashboard");
 });
 
 app.post("/shipper/requests/:id/decline", requireAuth, requireRole("SHIPPER"), async (req, res) => {
   const requestId = Number(req.params.id);
   const r = await pool.query(`
-    SELECT lr.*, l.shipper_id
+    SELECT lr.*, l.shipper_id, l.lane_from, l.lane_to
     FROM load_requests lr
     JOIN loads l ON l.id = lr.load_id
     WHERE lr.id=$1
@@ -969,6 +1183,17 @@ app.post("/shipper/requests/:id/decline", requireAuth, requireRole("SHIPPER"), a
   if (!row || row.shipper_id !== req.user.id) return res.sendStatus(404);
 
   await pool.query(`UPDATE load_requests SET status='DECLINED' WHERE id=$1`, [requestId]);
+
+  // Email notifications
+  const carrierEmail = (await pool.query(`SELECT email FROM users WHERE id=$1`, [row.carrier_id])).rows[0]?.email;
+  if (carrierEmail) {
+    await sendEmail(
+      carrierEmail,
+      `DFX Request Declined • Load #${row.load_id}`,
+      `<p><b>Your request was declined.</b></p><p>Load #${row.load_id}: ${escapeHtml(row.lane_from)} → ${escapeHtml(row.lane_to)}</p>`
+    );
+  }
+
   res.redirect("/dashboard");
 });
 
@@ -1035,7 +1260,7 @@ app.post("/admin/carriers/:id/approve", requireAuth, requireRole("ADMIN"), async
 });
 app.post("/admin/carriers/:id/reject", requireAuth, requireRole("ADMIN"), async (req, res) => {
   const carrierId = Number(req.params.id);
-  await pool.query(`UPDATE carriers_compliance SET status='REJECTED', updated_at=NOW(), admin_note='Rejected', updated_at=NOW() WHERE carrier_id=$1`, [carrierId]);
+  await pool.query(`UPDATE carriers_compliance SET status='REJECTED', admin_note='Rejected', updated_at=NOW() WHERE carrier_id=$1`, [carrierId]);
   res.redirect("/dashboard");
 });
 
@@ -1051,25 +1276,24 @@ app.get("/loads", async (req, res) => {
 
   const r = await pool.query(`SELECT * FROM loads ORDER BY created_at DESC LIMIT 200`);
 
-  res.send(layout({
-    title: "Load Board",
-    user,
-    body: `<div class="card">
+  const body = `
+    <div class="card">
       <div class="row" style="justify-content:space-between">
         <div>
           <h2 style="margin:0">Load Board</h2>
-          <div class="muted">Transparent loads: rate + terms + detention + accessorials shown.</div>
+          <div class="muted">All-in pricing and terms shown by default.</div>
         </div>
         ${user?.role === "CARRIER"
-          ? `<span class="badge ${carrierBadge === "APPROVED" ? "ok" : "warn"}">Carrier status: ${escapeHtml(carrierBadge)}</span>`
+          ? `<span class="badge ${carrierBadge === "APPROVED" ? "ok" : "warn"}">Carrier: ${escapeHtml(carrierBadge)}</span>`
           : user?.role === "SHIPPER"
-            ? `<a class="btn blue" href="/shipper/plans">Plans</a>`
+            ? `<a class="btn green" href="/shipper/plans">Plans</a>`
             : ``}
       </div>
       <div class="hr"></div>
       ${r.rows.length ? r.rows.map(l => loadCard(l, user, carrierBadge)).join("") : `<div class="muted">No loads posted yet.</div>`}
-    </div>`
-  }));
+    </div>
+  `;
+  res.send(layout({ title: "Loads", user, body }));
 });
 
 function loadCard(l, user, carrierBadge) {
@@ -1086,7 +1310,7 @@ function loadCard(l, user, carrierBadge) {
         <div style="text-align:right">
           <div style="font-weight:1000">${money(l.rate_all_in)} <span class="muted">(all-in)</span></div>
           <div class="muted">${int(l.miles).toLocaleString()} mi • ${int(l.weight_lbs).toLocaleString()} lbs</div>
-          <div style="margin-top:6px"><span class="badge ${status==="BOOKED"?"ok":status==="REQUESTED"?"warn":"orange"}">${escapeHtml(status)}</span></div>
+          <div style="margin-top:6px"><span class="badge ${status==="BOOKED"?"ok":status==="REQUESTED"?"warn":"brand"}">${escapeHtml(status)}</span></div>
         </div>
       </div>
 
@@ -1107,7 +1331,7 @@ function loadCard(l, user, carrierBadge) {
           ${status === "BOOKED"
             ? `<span class="badge ok">Booked</span>`
             : carrierBadge === "APPROVED"
-              ? `<form method="POST" action="/carrier/loads/${l.id}/request"><button class="btn orange" type="submit">Request to Book</button></form>`
+              ? `<form method="POST" action="/carrier/loads/${l.id}/request"><button class="btn green" type="submit">Request to Book</button></form>`
               : `<span class="badge warn">Upload docs + get approved to request loads</span>`
           }
         </div>
@@ -1117,7 +1341,7 @@ function loadCard(l, user, carrierBadge) {
 }
 
 /* ---------- Health ---------- */
-app.get("/health", (_, res) => res.json({ ok: true, stripeEnabled }));
+app.get("/health", (_, res) => res.json({ ok: true, stripeEnabled, smtpEnabled: !!getMailer() }));
 
 initDb()
   .then(() => app.listen(PORT, "0.0.0.0", () => console.log("Server running on port", PORT)))
