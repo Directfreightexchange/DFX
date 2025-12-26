@@ -1,84 +1,70 @@
 /**
- * Direct Freight Exchange (DFX) — single-file Render + Postgres app
+ * Direct Freight Exchange (DFX) — single-file production-ish app
+ * - Shippers subscribe (Stripe) to post loads (plans/limits)
+ * - Carriers free; must upload compliance docs to get VERIFIED badge
+ * - Load board: carriers see OPEN/REQUESTED loads by default; sort newest (default) or RPM
+ * - Contract templates: auto-filled Rate Confirmation after booking
+ * - Forgot password: email reset link
+ * - Optional: email notifications + Help button (contact form)
  *
- * Changes per request:
- * - Theme: GREEN + BLACK (enterprise)
- * - Carriers: default sort = newest, option to sort by RPM
- * - Remove “DAT style …” wording everywhere:
- *   - Home page carrier section: removed “DAT-style load board”
- *   - Loadboard header: removed “DAT-style filters”
- *   - Loadboard page: removed “DAT-level upgrades” section
- * - Add "Standard Van" to equipment options
- * - Show ALL loads (no LIMIT). (Note: may become slow with very large datasets; pagination recommended later.)
- * - Safe SQL params for filters
+ * Required env vars:
+ *   DATABASE_URL, JWT_SECRET
  *
- * Optional features included:
- * - Stripe subscriptions for shippers (plans)
- * - Stripe Billing Portal for invoices/receipts downloads
- * - SMTP email notifications (optional)
- * - Optional S3 doc storage (recommended; Render filesystem is ephemeral)
+ * Optional (Stripe subscriptions + invoices):
+ *   STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET
+ *   STRIPE_PRICE_STARTER, STRIPE_PRICE_GROWTH, STRIPE_PRICE_ENTERPRISE
+ *   APP_URL (e.g. https://yourdomain.com)
+ *
+ * Optional (Email):
+ *   SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM
+ *   SUPPORT_EMAIL (for /help contact form; defaults to SMTP_FROM)
  */
 
 const express = require("express");
 const bcrypt = require("bcryptjs");
 const cookieParser = require("cookie-parser");
 const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
 const { Pool } = require("pg");
 const multer = require("multer");
 const Stripe = require("stripe");
 const nodemailer = require("nodemailer");
 
-// Optional S3 (AWS SDK v3)
-let S3Client, PutObjectCommand, GetObjectCommand;
-try {
-  ({ S3Client, PutObjectCommand, GetObjectCommand } = require("@aws-sdk/client-s3"));
-} catch {
-  // ok if not installed
-}
-const crypto = require("crypto");
-
 const app = express();
 
-// Stripe webhook needs raw body only on this route:
+// IMPORTANT: Stripe webhook needs raw body ONLY on this route
 app.post("/stripe/webhook", express.raw({ type: "application/json" }));
+
 app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
 app.use(cookieParser());
 
 const PORT = process.env.PORT || 3000;
 
-// Core env
 const DATABASE_URL = process.env.DATABASE_URL;
 const JWT_SECRET = process.env.JWT_SECRET;
+
 const APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;
 
-// Stripe env (Shippers subscribe; Carriers free)
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
+
 const STRIPE_PRICE_STARTER = process.env.STRIPE_PRICE_STARTER;
 const STRIPE_PRICE_GROWTH = process.env.STRIPE_PRICE_GROWTH;
 const STRIPE_PRICE_ENTERPRISE = process.env.STRIPE_PRICE_ENTERPRISE;
 
-// Stripe billing portal (for invoices/receipts downloads)
-const STRIPE_PORTAL_RETURN_URL = process.env.STRIPE_PORTAL_RETURN_URL || `${APP_URL}/shipper/plans`;
-
-// SMTP (optional) for notifications + alerts
+// SMTP (optional, for email notifications + password reset + help)
 const SMTP_HOST = process.env.SMTP_HOST;
 const SMTP_PORT = Number(process.env.SMTP_PORT || "587");
 const SMTP_USER = process.env.SMTP_USER;
 const SMTP_PASS = process.env.SMTP_PASS;
 const SMTP_FROM = process.env.SMTP_FROM || "no-reply@directfreightexchange.com";
+const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || SMTP_FROM;
 
-// Support (simple contact form)
-const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || "support@directfreightexchange.com";
-const SUPPORT_PHONE = process.env.SUPPORT_PHONE || "";
-
-// Optional S3 env
-const AWS_REGION = process.env.AWS_REGION;
-const S3_BUCKET = process.env.S3_BUCKET;
-const S3_PUBLIC_BASE_URL = process.env.S3_PUBLIC_BASE_URL || ""; // optional
+const IS_PROD = String(process.env.NODE_ENV || "").toLowerCase() === "production";
 
 function bootFail(msg) {
-  app.get("*", (_, res) => res.send(`<h1>Config error</h1><p>${escapeHtml(msg)}</p>`));
+  app.get("*", (_, res) => res.status(500).send(`<h1>Config error</h1><p>${escapeHtml(msg)}</p>`));
   app.listen(PORT, "0.0.0.0");
 }
 
@@ -94,17 +80,6 @@ const stripeEnabled = !!(
 );
 const stripe = stripeEnabled ? new Stripe(STRIPE_SECRET_KEY) : null;
 
-const s3Enabled = !!(
-  AWS_REGION &&
-  S3_BUCKET &&
-  process.env.AWS_ACCESS_KEY_ID &&
-  process.env.AWS_SECRET_ACCESS_KEY &&
-  S3Client &&
-  PutObjectCommand &&
-  GetObjectCommand
-);
-const s3 = s3Enabled ? new S3Client({ region: AWS_REGION }) : null;
-
 const pool = new Pool({
   connectionString: DATABASE_URL,
   ssl: { rejectUnauthorized: false },
@@ -115,15 +90,33 @@ const upload = multer({
   limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
 });
 
-// Pricing
+// Plans
 const PLANS = {
   STARTER: { label: "Starter", price: 99, limit: 15 },
   GROWTH: { label: "Growth", price: 199, limit: 30 },
-  ENTERPRISE: { label: "Enterprise", price: 399, limit: -1 },
+  ENTERPRISE: { label: "Enterprise", price: 399, limit: -1 }, // unlimited
 };
 
-const DISCLAIMER_TEXT =
-  "Direct Freight Exchange is a technology platform and is not a broker or carrier. Users are responsible for verifying compliance, insurance, and payment terms.";
+function priceIdForPlan(plan) {
+  if (plan === "STARTER") return STRIPE_PRICE_STARTER;
+  if (plan === "GROWTH") return STRIPE_PRICE_GROWTH;
+  if (plan === "ENTERPRISE") return STRIPE_PRICE_ENTERPRISE;
+  return null;
+}
+
+function planFromPriceId(priceId) {
+  if (!priceId) return null;
+  if (priceId === STRIPE_PRICE_STARTER) return "STARTER";
+  if (priceId === STRIPE_PRICE_GROWTH) return "GROWTH";
+  if (priceId === STRIPE_PRICE_ENTERPRISE) return "ENTERPRISE";
+  return null;
+}
+
+function monthKey(d = new Date()) {
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  return `${y}-${m}`;
+}
 
 /* ---------------- Utilities ---------------- */
 function escapeHtml(s) {
@@ -144,29 +137,24 @@ function int(n) {
   if (!Number.isFinite(x)) return 0;
   return Math.trunc(x);
 }
-function monthKey(d = new Date()) {
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  return `${y}-${m}`;
+function rpm(rate, miles) {
+  const r = Number(rate);
+  const m = Number(miles);
+  if (!Number.isFinite(r) || !Number.isFinite(m) || m <= 0) return 0;
+  return r / m;
 }
-function qStr(v) {
-  return String(v ?? "").trim();
-}
-function qNum(v, fallback = null) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : fallback;
-}
-function qArr(v) {
-  if (Array.isArray(v)) return v.map((x) => String(x).trim()).filter(Boolean);
-  const s = String(v ?? "").trim();
-  if (!s) return [];
-  return s.split(",").map((x) => x.trim()).filter(Boolean);
+function safeEqLower(s) {
+  return String(s || "").trim().toLowerCase();
 }
 
-/* ---------------- Auth ---------------- */
+/* ---------------- Auth helpers ---------------- */
 function signIn(res, user) {
   const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: "7d" });
-  res.cookie("dfx_token", token, { httpOnly: true, sameSite: "lax", secure: true });
+  res.cookie("dfx_token", token, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: IS_PROD,
+  });
 }
 function getUser(req) {
   try {
@@ -217,45 +205,35 @@ async function sendEmail(to, subject, html) {
   }
 }
 
-/* ---------------- S3 helpers (optional) ---------------- */
-function sanitizeFilename(name) {
-  const base = String(name || "file").replace(/[^a-zA-Z0-9._-]/g, "_");
-  return base.slice(0, 160) || "file";
-}
-function s3KeyForCarrierDoc(carrierId, docType, originalName) {
-  const safe = sanitizeFilename(originalName);
-  const id = crypto.randomUUID();
-  const yyyy = new Date().getUTCFullYear();
-  return `carriers/${carrierId}/${yyyy}/${docType}/${id}_${safe}`;
-}
-function publicUrlForKey(key) {
-  if (!S3_PUBLIC_BASE_URL) return "";
-  const base = S3_PUBLIC_BASE_URL.replace(/\/+$/, "");
-  return `${base}/${key}`;
-}
-async function uploadBufferToS3({ key, buffer, contentType }) {
-  if (!s3Enabled) throw new Error("S3 not configured.");
-  await s3.send(
-    new PutObjectCommand({
-      Bucket: S3_BUCKET,
-      Key: key,
-      Body: buffer,
-      ContentType: contentType || "application/octet-stream",
-      ACL: "private",
-    })
-  );
-  return { key, url: publicUrlForKey(key) };
-}
-async function streamS3ObjectToRes(key, res) {
-  const out = await s3.send(new GetObjectCommand({ Bucket: S3_BUCKET, Key: key }));
-  if (out.ContentType) res.setHeader("Content-Type", out.ContentType);
-  if (out.ContentLength) res.setHeader("Content-Length", String(out.ContentLength));
-  out.Body.pipe(res);
-}
+/* ---------------- UI / Layout ---------------- */
+const DISCLAIMER_TEXT =
+  "Direct Freight Exchange is a technology platform and is not a broker or carrier. Users are responsible for verifying compliance, insurance, and payment terms.";
 
-/* ---------------- UI layout (Green/Black) ---------------- */
 function layout({ title, user, body }) {
-  const helpFab = `<a class="helpFab" href="/support">Help</a>`;
+  const helpFab = `
+    <a class="helpFab" href="/help" title="Help / Live Agent">
+      Help
+    </a>
+  `;
+
+  const footer = `
+    <div class="footer">
+      <div class="footerTop">
+        <div class="footBrand">
+          <div class="footMark">DFX</div>
+          <div>
+            <div class="footName">Direct Freight Exchange</div>
+            <div class="footSub">Direct shipper ↔ carrier • Full transparency loads • Carriers free</div>
+          </div>
+        </div>
+        <div class="footLinks">
+          <a href="/terms">Terms / Disclaimer</a>
+          <a href="/health">Status</a>
+        </div>
+      </div>
+      <div class="footDisclaimer">${escapeHtml(DISCLAIMER_TEXT)}</div>
+    </div>
+  `;
 
   return `<!doctype html>
 <html><head>
@@ -264,16 +242,17 @@ function layout({ title, user, body }) {
 <style>
 :root{
   --bg:#050607;
-  --panel:rgba(12,16,14,.70);
+  --panel:#0b0f10;
+  --card:#0d1412;
   --line:rgba(255,255,255,.10);
   --text:#eef7f1;
-  --muted:rgba(238,247,241,.70);
+  --muted:rgba(238,247,241,.68);
 
   --green:#22c55e;
   --green2:#16a34a;
   --lime:#a3e635;
 
-  --shadow:0 18px 60px rgba(0,0,0,.55);
+  --shadow:0 18px 60px rgba(0,0,0,.52);
   --radius:18px;
 }
 *{box-sizing:border-box}
@@ -283,7 +262,7 @@ body{
   background:
     radial-gradient(900px 520px at 12% -8%, rgba(34,197,94,.18), transparent 55%),
     radial-gradient(900px 520px at 92% 0%, rgba(163,230,53,.12), transparent 55%),
-    linear-gradient(180deg, rgba(34,197,94,.10), transparent 45%),
+    linear-gradient(180deg, rgba(34,197,94,.08), transparent 45%),
     var(--bg);
 }
 .wrap{max-width:1200px;margin:0 auto;padding:22px}
@@ -292,30 +271,30 @@ a{color:var(--lime);text-decoration:none} a:hover{text-decoration:underline}
 .nav{
   display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:center;
   padding:14px 16px;border:1px solid var(--line);border-radius:20px;
-  background:var(--panel);backdrop-filter: blur(10px);box-shadow:var(--shadow);
+  background:rgba(13,20,18,.70);backdrop-filter: blur(10px);box-shadow:var(--shadow);
   position:sticky; top:14px; z-index:20;
 }
 .brand{display:flex;gap:12px;align-items:center}
 .mark{
   width:46px;height:46px;border-radius:16px;border:1px solid rgba(255,255,255,.10);
   background: linear-gradient(135deg, rgba(34,197,94,.95), rgba(163,230,53,.65));
-  display:grid;place-items:center; font-weight:1000; color:#06130b;
+  display:grid;place-items:center; font-weight:1000; color:#07120b;
 }
 .sub{color:var(--muted);font-size:12px}
 .right{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
 .pill{
   padding:7px 10px;border-radius:999px;border:1px solid var(--line);
-  background:rgba(6,8,9,.60);color:var(--muted);font-size:12px
+  background:rgba(6,8,9,.65);color:var(--muted);font-size:12px
 }
 .btn{
   display:inline-flex;align-items:center;justify-content:center;gap:8px;
   padding:10px 14px;border-radius:12px;border:1px solid var(--line);
-  background:rgba(6,8,9,.60);color:var(--text);cursor:pointer;
+  background:rgba(6,8,9,.65);color:var(--text);cursor:pointer;
   transition: transform .08s ease, filter .12s ease;
 }
 .btn:hover{filter:brightness(1.06)}
 .btn:active{transform:translateY(1px)}
-.btn.primary{
+.btn.green{
   border:none;
   background: linear-gradient(135deg, rgba(34,197,94,.98), rgba(163,230,53,.70));
   color:#06130b; font-weight:1000;
@@ -328,11 +307,11 @@ a{color:var(--lime);text-decoration:none} a:hover{text-decoration:underline}
 }
 .card{
   margin-top:16px;border:1px solid var(--line);border-radius:var(--radius);
-  background:var(--panel);backdrop-filter: blur(10px);box-shadow:var(--shadow);padding:18px
+  background:rgba(13,20,18,.70);backdrop-filter: blur(10px);box-shadow:var(--shadow);padding:18px
 }
 .hero{
   margin-top:16px;border:1px solid var(--line);border-radius:var(--radius);
-  background: linear-gradient(180deg, rgba(12,16,14,.78), rgba(6,8,9,.62));
+  background: linear-gradient(180deg, rgba(13,20,18,.78), rgba(6,8,9,.62));
   backdrop-filter: blur(10px);box-shadow:var(--shadow);padding:20px;position:relative;overflow:hidden;
 }
 .hero:before{
@@ -355,73 +334,87 @@ a{color:var(--lime);text-decoration:none} a:hover{text-decoration:underline}
 @media(max-width:980px){.filters{grid-template-columns:1fr 1fr}}
 input,select,textarea{
   width:100%;padding:12px;border-radius:12px;border:1px solid var(--line);
-  background:rgba(6,8,9,.68);color:var(--text);outline:none
+  background:rgba(6,8,9,.72);color:var(--text);outline:none
 }
-textarea{min-height:120px;resize:vertical}
+textarea{min-height:110px;resize:vertical}
 input:focus,select:focus,textarea:focus{border-color:rgba(34,197,94,.55)}
 
 .badge{
   display:inline-flex;gap:8px;align-items:center;padding:6px 10px;border-radius:999px;
-  border:1px solid var(--line);background:rgba(6,8,9,.55);color:var(--muted);font-size:12px
+  border:1px solid var(--line);background:rgba(6,8,9,.62);color:var(--muted);font-size:12px
 }
-.badge.ok{border-color:rgba(34,197,94,.35);background:rgba(34,197,94,.10);color:rgba(219,255,236,.95)}
-.badge.warn{border-color:rgba(163,230,53,.25);background:rgba(163,230,53,.08);color:rgba(240,255,219,.95)}
-.badge.brand{border-color:rgba(34,197,94,.35);background:rgba(34,197,94,.08);color:rgba(219,255,236,.95)}
+.badge.ok{border-color:rgba(34,197,94,.30);background:rgba(34,197,94,.10);color:rgba(219,255,236,.92)}
+.badge.warn{border-color:rgba(163,230,53,.25);background:rgba(163,230,53,.08);color:rgba(240,255,219,.90)}
+.badge.brand{border-color:rgba(34,197,94,.35);background:rgba(34,197,94,.08);color:rgba(219,255,236,.92)}
 
-.helpFab{
-  position:fixed; right:18px; bottom:18px; z-index:9999;
-  border:1px solid rgba(34,197,94,.28);
-  background:rgba(6,8,9,.72);
+.load{margin-top:12px;padding:14px;border-radius:16px;border:1px solid rgba(255,255,255,.08);background:rgba(6,8,9,.62)}
+.loadTop{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.lane{font-weight:1000}
+.kv{display:grid;grid-template-columns:210px 1fr;gap:6px;margin-top:10px}
+@media(max-width:780px){.kv{grid-template-columns:1fr}}
+.k{color:var(--muted)}
+
+.footer{
+  margin-top:16px;
+  border:1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(6,8,9,.62);
   backdrop-filter: blur(10px);
-  color:var(--text);
-  padding:12px 14px;
-  border-radius:999px;
   box-shadow: var(--shadow);
-  font-weight:900;
+  padding:16px;
 }
-.helpFab:hover{text-decoration:none;filter:brightness(1.08)}
+.footerTop{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:center}
+.footBrand{display:flex;gap:12px;align-items:center}
+.footMark{
+  width:44px;height:44px;border-radius:16px;border:1px solid rgba(255,255,255,.10);
+  background: linear-gradient(135deg, rgba(34,197,94,.95), rgba(163,230,53,.65));
+  display:grid;place-items:center; font-weight:1000; color:#06130b;
+}
+.footName{font-weight:1000}
+.footSub{font-size:12px;color:var(--muted)}
+.footLinks{display:flex;gap:14px;flex-wrap:wrap}
+.footDisclaimer{margin-top:10px;color:var(--muted);font-size:12px;line-height:1.35}
+
+/* Help FAB */
+.helpFab{
+  position:fixed; right:18px; bottom:18px; z-index:50;
+  padding:12px 14px; border-radius:999px;
+  border:1px solid rgba(163,230,53,.25);
+  background: rgba(6,8,9,.70);
+  box-shadow: var(--shadow);
+  color: var(--text);
+  font-weight: 800;
+}
+.helpFab:hover{filter:brightness(1.08); text-decoration:none}
 </style>
 </head>
 <body>
 ${helpFab}
 <div class="wrap">
-  <div class="nav">
-    <div class="brand">
-      <div class="mark">DFX</div>
-      <div>
-        <div style="font-weight:1000">Direct Freight Exchange</div>
-        <div class="sub">Direct shipper ↔ carrier • Full transparency loads • Carriers free</div>
-      </div>
-    </div>
-    <div class="right">
-      <a class="btn ghost" href="/">Home</a>
-      <a class="btn ghost" href="/loads">Load Board</a>
-      ${
-        user
-          ? `<span class="pill">${escapeHtml(user.role)}</span><span class="pill">${escapeHtml(user.email)}</span>
-             <a class="btn primary" href="/dashboard">Dashboard</a><a class="btn ghost" href="/logout">Logout</a>`
-          : `<a class="btn ghost" href="/signup">Sign up</a><a class="btn primary" href="/login">Login</a>`
-      }
+<div class="nav">
+  <div class="brand">
+    <div class="mark">DFX</div>
+    <div>
+      <div style="font-weight:1000">Direct Freight Exchange</div>
+      <div class="sub">Direct shipper ↔ carrier • Full transparency loads • Carriers free</div>
     </div>
   </div>
-
-  ${body}
-
-  <div class="card" style="margin-top:16px">
-    <div class="row" style="justify-content:space-between">
-      <div class="muted">${escapeHtml(DISCLAIMER_TEXT)}</div>
-      <div class="row">
-        <a class="btn ghost" href="/terms">Terms</a>
-        <a class="btn ghost" href="/support">Support</a>
-        <a class="btn ghost" href="/health">Status</a>
-      </div>
-    </div>
+  <div class="right">
+    <a class="btn ghost" href="/">Home</a>
+    <a class="btn ghost" href="/loads">Load Board</a>
+    ${user
+      ? `<span class="pill">${escapeHtml(user.role)}</span><span class="pill">${escapeHtml(user.email)}</span>
+         <a class="btn green" href="/dashboard">Dashboard</a><a class="btn ghost" href="/logout">Logout</a>`
+      : `<a class="btn ghost" href="/signup">Sign up</a><a class="btn green" href="/login">Login</a>`}
   </div>
+</div>
+${body}
+${footer}
 </div>
 </body></html>`;
 }
 
-/* ---------------- DB schema + migrations ---------------- */
+/* ---------------- DB schema (with safe “migrations”) ---------------- */
 async function initDb() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
@@ -438,7 +431,7 @@ async function initDb() {
       stripe_subscription_id TEXT,
       status TEXT NOT NULL DEFAULT 'INACTIVE' CHECK (status IN ('INACTIVE','ACTIVE','PAST_DUE','CANCELED')),
       plan TEXT CHECK (plan IN ('STARTER','GROWTH','ENTERPRISE')),
-      monthly_limit INTEGER NOT NULL DEFAULT 0,
+      monthly_limit INTEGER NOT NULL DEFAULT 0,            -- -1 means unlimited
       usage_month TEXT NOT NULL DEFAULT '',
       loads_used INTEGER NOT NULL DEFAULT 0,
       updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -481,7 +474,7 @@ async function initDb() {
       special_requirements TEXT NOT NULL,
 
       status TEXT NOT NULL DEFAULT 'OPEN' CHECK (status IN ('OPEN','REQUESTED','BOOKED')),
-      booked_carrier_id INTEGER,
+      booked_carrier_id INTEGER REFERENCES users(id),
 
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
@@ -494,68 +487,24 @@ async function initDb() {
       created_at TIMESTAMPTZ DEFAULT NOW(),
       UNIQUE(load_id, carrier_id)
     );
-  `);
 
-  // Ensure columns exist (for older deployments)
-  await pool.query(`ALTER TABLE loads ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'OPEN';`);
-  await pool.query(`ALTER TABLE loads ADD COLUMN IF NOT EXISTS booked_carrier_id INTEGER;`);
-
-  // Optional S3 doc fields
-  await pool.query(`ALTER TABLE carriers_compliance ADD COLUMN IF NOT EXISTS insurance_s3_key TEXT;`);
-  await pool.query(`ALTER TABLE carriers_compliance ADD COLUMN IF NOT EXISTS authority_s3_key TEXT;`);
-  await pool.query(`ALTER TABLE carriers_compliance ADD COLUMN IF NOT EXISTS w9_s3_key TEXT;`);
-  await pool.query(`ALTER TABLE carriers_compliance ADD COLUMN IF NOT EXISTS insurance_s3_url TEXT;`);
-  await pool.query(`ALTER TABLE carriers_compliance ADD COLUMN IF NOT EXISTS authority_s3_url TEXT;`);
-  await pool.query(`ALTER TABLE carriers_compliance ADD COLUMN IF NOT EXISTS w9_s3_url TEXT;`);
-
-  // Carrier preferences
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS carrier_preferences (
-      carrier_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-      home_base TEXT DEFAULT '',
-      preferred_equipment TEXT[] DEFAULT '{}',
-      preferred_min_miles INTEGER DEFAULT 0,
-      preferred_max_miles INTEGER DEFAULT 0,
-      preferred_min_weight INTEGER DEFAULT 0,
-      updated_at TIMESTAMPTZ DEFAULT NOW()
-    );
-  `);
-
-  // Saved searches (alerts)
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS carrier_saved_searches (
-      id SERIAL PRIMARY KEY,
-      carrier_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      name TEXT NOT NULL,
-      equips TEXT[] DEFAULT '{}',
-      origin TEXT DEFAULT '',
-      dest TEXT DEFAULT '',
-      min_miles INTEGER,
-      max_miles INTEGER,
-      min_weight INTEGER,
-      max_weight INTEGER,
-      pickup_from TEXT DEFAULT '',
-      pickup_to TEXT DEFAULT '',
-      only_open BOOLEAN NOT NULL DEFAULT true,
+    CREATE TABLE IF NOT EXISTS password_resets (
+      token TEXT PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      expires_at TIMESTAMPTZ NOT NULL,
+      used BOOLEAN NOT NULL DEFAULT false,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
   `);
+
+  // Extra safety for “column does not exist” issues if DB was created earlier with different schema.
+  // These are idempotent in modern Postgres.
+  await pool.query(`ALTER TABLE loads ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'OPEN'`);
+  await pool.query(`ALTER TABLE loads ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW()`);
+  await pool.query(`ALTER TABLE loads ADD COLUMN IF NOT EXISTS booked_carrier_id INTEGER`);
 }
 
-/* ---------------- Stripe helpers ---------------- */
-function planFromPriceId(priceId) {
-  if (!priceId) return null;
-  if (priceId === STRIPE_PRICE_STARTER) return "STARTER";
-  if (priceId === STRIPE_PRICE_GROWTH) return "GROWTH";
-  if (priceId === STRIPE_PRICE_ENTERPRISE) return "ENTERPRISE";
-  return null;
-}
-function priceIdForPlan(plan) {
-  if (plan === "STARTER") return STRIPE_PRICE_STARTER;
-  if (plan === "GROWTH") return STRIPE_PRICE_GROWTH;
-  if (plan === "ENTERPRISE") return STRIPE_PRICE_ENTERPRISE;
-  return null;
-}
+/* ---------------- Billing helpers ---------------- */
 async function upsertBillingFromSubscription({ shipperId, customerId, subscriptionId, subStatus, priceId }) {
   const plan = planFromPriceId(priceId);
   const planDef = plan ? PLANS[plan] : null;
@@ -565,8 +514,8 @@ async function upsertBillingFromSubscription({ shipperId, customerId, subscripti
     subStatus === "canceled" ? "CANCELED" : "INACTIVE";
 
   const limit = planDef ? planDef.limit : 0;
-  const nowMonth = monthKey();
 
+  const nowMonth = monthKey();
   const existing = await pool.query(`SELECT usage_month, loads_used FROM shippers_billing WHERE shipper_id=$1`, [shipperId]);
   const prevMonth = existing.rows[0]?.usage_month || "";
   const loadsUsed = existing.rows[0]?.loads_used ?? 0;
@@ -590,6 +539,7 @@ async function upsertBillingFromSubscription({ shipperId, customerId, subscripti
     [shipperId, customerId || null, subscriptionId || null, mapped, plan, limit, newMonth, newUsed]
   );
 }
+
 async function getAndNormalizeBilling(shipperId) {
   const r = await pool.query(`SELECT * FROM shippers_billing WHERE shipper_id=$1`, [shipperId]);
   let b = r.rows[0];
@@ -601,76 +551,28 @@ async function getAndNormalizeBilling(shipperId) {
     );
     b = (await pool.query(`SELECT * FROM shippers_billing WHERE shipper_id=$1`, [shipperId])).rows[0];
   }
+
   const nowM = monthKey();
   if (b.usage_month !== nowM) {
-    await pool.query(`UPDATE shippers_billing SET usage_month=$1, loads_used=0, updated_at=NOW() WHERE shipper_id=$2`, [nowM, shipperId]);
+    await pool.query(
+      `UPDATE shippers_billing SET usage_month=$1, loads_used=0, updated_at=NOW() WHERE shipper_id=$2`,
+      [nowM, shipperId]
+    );
     b.usage_month = nowM;
     b.loads_used = 0;
   }
   return b;
 }
+
 function postingAllowed(billing) {
-  if (!stripeEnabled) return { ok: true, reason: null };
+  if (!stripeEnabled) return { ok: true, reason: null }; // allow dev/testing if Stripe not configured
   if (billing.status !== "ACTIVE") return { ok: false, reason: "Subscription required (not ACTIVE)." };
   if (billing.monthly_limit === -1) return { ok: true, reason: null };
   if (billing.loads_used >= billing.monthly_limit) return { ok: false, reason: "Monthly posting limit reached." };
   return { ok: true, reason: null };
 }
 
-/* ---------------- Pages ---------------- */
-app.get("/", (req, res) => {
-  const user = getUser(req);
-  const body = `
-    <div class="hero">
-      <div class="heroInner">
-        <div class="row">
-          <span class="badge brand">All-In Pricing</span>
-          <span class="badge brand">Carrier Verified</span>
-          <span class="badge brand">Direct Booking</span>
-        </div>
-        <h2 class="title" style="margin-top:12px">No hidden rates. No phone calls. No broker games.</h2>
-        <div class="muted" style="max-width:900px">
-          Direct Freight Exchange connects shippers and carriers directly with <b>full load transparency</b>:
-          <b>all-in rate</b>, <b>payment terms</b>, <b>detention</b>, <b>accessorials</b>, appointment type, and notes — visible up front.
-        </div>
-        <div class="hr"></div>
-        <div class="row">
-          <a class="btn primary" href="${user ? "/dashboard" : "/signup"}">${user ? "Go to Dashboard" : "Create account"}</a>
-          <a class="btn ghost" href="/loads">Browse Load Board</a>
-          <a class="btn ghost" href="/terms">Terms</a>
-        </div>
-      </div>
-    </div>
-
-    <div class="grid">
-      <div class="card">
-        <h3 style="margin-top:0">Shippers</h3>
-        <div class="muted">Subscribe to post loads. Carriers see RPM + all terms by default.</div>
-        <div class="hr"></div>
-        <div class="row">
-          <span class="badge ok">$99 • 15 loads/mo</span>
-          <span class="badge ok">$199 • 30 loads/mo</span>
-          <span class="badge ok">$399 • Unlimited</span>
-          <a class="btn primary" href="${user?.role === "SHIPPER" ? "/shipper/plans" : "/signup"}">View Plans</a>
-        </div>
-      </div>
-
-      <div class="card">
-        <h3 style="margin-top:0">Carriers</h3>
-        <div class="muted">Free access. Upload compliance docs once to get Verified, then request loads directly.</div>
-        <div class="hr"></div>
-        <div class="row">
-          <span class="badge brand">Verified badge</span>
-          <span class="badge brand">Request-to-Book</span>
-          <span class="badge brand">Transparent terms</span>
-          <a class="btn primary" href="${user?.role ? "/dashboard" : "/signup"}">Carrier Dashboard</a>
-        </div>
-      </div>
-    </div>
-  `;
-  res.send(layout({ title: "DFX", user, body }));
-});
-
+/* ---------------- Legal / Terms ---------------- */
 app.get("/terms", (req, res) => {
   const user = getUser(req);
   const body = `
@@ -680,70 +582,69 @@ app.get("/terms", (req, res) => {
       <div class="muted" style="line-height:1.55">
         <p><b>Platform Disclaimer</b></p>
         <p>${escapeHtml(DISCLAIMER_TEXT)}</p>
+
         <p><b>User Responsibilities</b></p>
         <ul>
           <li>Carriers are responsible for maintaining valid authority, insurance, and compliance documentation.</li>
           <li>Shippers are responsible for verifying carrier compliance, insurance, and suitability for the load.</li>
           <li>All parties are responsible for reviewing and agreeing to payment terms, detention terms, accessorials, and load requirements.</li>
         </ul>
+
         <p><b>No Legal / Financial Advice</b></p>
-        <p>DFX does not provide legal, regulatory, insurance, or financial advice. Consult qualified professionals as needed.</p>
+        <p>DFX does not provide legal, regulatory, insurance, or financial advice.</p>
       </div>
     </div>
   `;
   res.send(layout({ title: "Terms", user, body }));
 });
 
-/* ---------------- Support ---------------- */
-app.get("/support", (req, res) => {
+/* ---------------- Help (live agent button -> contact form) ---------------- */
+app.get("/help", (req, res) => {
   const user = getUser(req);
   const body = `
     <div class="card">
-      <h2 style="margin-top:0">Support</h2>
-      <div class="muted">Talk to a live agent (we reply to your email).</div>
+      <h2 style="margin-top:0">Help / Live Agent</h2>
+      <div class="muted">Send a message and our team will respond by email.</div>
       <div class="hr"></div>
-      <div class="row">
-        <a class="btn primary" href="mailto:${escapeHtml(SUPPORT_EMAIL)}">Email Support</a>
-        ${SUPPORT_PHONE ? `<a class="btn ghost" href="tel:${escapeHtml(SUPPORT_PHONE)}">Call</a>` : ``}
-      </div>
-      <div class="hr"></div>
-      <form method="POST" action="/support">
+      <form method="POST" action="/help">
         <div class="filters" style="grid-template-columns:1fr 1fr">
-          <input name="name" placeholder="Your name" required />
-          <input name="email" type="email" placeholder="Your email" required />
+          <input name="email" type="email" placeholder="Your email" value="${escapeHtml(user?.email || "")}" required />
+          <input name="topic" placeholder="Topic (Billing / Booking / Verification / Other)" required />
         </div>
         <div style="margin-top:10px">
-          <textarea name="message" placeholder="How can we help?" required></textarea>
+          <textarea name="message" placeholder="Tell us what you need..." required></textarea>
         </div>
         <div class="row" style="margin-top:12px">
-          <button class="btn primary" type="submit">Send</button>
-          <a class="btn ghost" href="/">Back</a>
+          <button class="btn green" type="submit">Send</button>
+          <a class="btn ghost" href="/dashboard">Back to Dashboard</a>
+        </div>
+        <div class="muted" style="margin-top:10px">
+          ${getMailer() ? `Email is enabled.` : `Email sending is not enabled yet (missing SMTP_* env vars). Your message will be logged in server logs.`}
         </div>
       </form>
     </div>
   `;
-  res.send(layout({ title: "Support", user, body }));
+  res.send(layout({ title: "Help", user, body }));
 });
-app.post("/support", async (req, res) => {
+
+app.post("/help", async (req, res) => {
   const user = getUser(req);
-  const name = qStr(req.body.name);
-  const email = qStr(req.body.email);
-  const message = qStr(req.body.message);
-  if (!name || !email || !message) return res.status(400).send("Missing fields.");
+  const email = safeEqLower(req.body.email);
+  const topic = String(req.body.topic || "").trim();
+  const message = String(req.body.message || "").trim();
+  if (!email || !topic || !message) return res.status(400).send("Missing fields.");
 
-  const who = user ? `${user.role} • ${user.email}` : "Guest";
   const html = `
-    <p><b>From:</b> ${escapeHtml(name)} (${escapeHtml(email)})</p>
-    <p><b>User:</b> ${escapeHtml(who)}</p>
-    <p><b>Message:</b><br/>${escapeHtml(message).replaceAll("\n", "<br/>")}</p>
+    <p><b>DFX Help Request</b></p>
+    <p><b>From:</b> ${escapeHtml(email)}</p>
+    <p><b>User:</b> ${escapeHtml(user ? `${user.email} (${user.role})` : "Not logged in")}</p>
+    <p><b>Topic:</b> ${escapeHtml(topic)}</p>
+    <p><b>Message:</b></p>
+    <pre style="white-space:pre-wrap">${escapeHtml(message)}</pre>
   `;
-  await sendEmail(SUPPORT_EMAIL, `DFX Support • ${name}`, html);
 
-  res.send(layout({
-    title: "Support Sent",
-    user,
-    body: `<div class="card"><h2 style="margin-top:0">Sent ✅</h2><div class="muted">We’ll reply to your email.</div><div class="hr"></div><a class="btn primary" href="/">Home</a></div>`
-  }));
+  await sendEmail(SUPPORT_EMAIL, `DFX Help: ${topic}`, html);
+  res.redirect("/help?sent=1");
 });
 
 /* ---------------- Auth ---------------- */
@@ -764,7 +665,7 @@ app.get("/signup", (req, res) => {
             <option value="SHIPPER">Shipper</option>
             <option value="CARRIER">Carrier (free)</option>
           </select>
-          <button class="btn primary" type="submit">Create</button>
+          <button class="btn green" type="submit">Create</button>
           <a class="btn ghost" href="/login">Login</a>
         </div>
       </form>
@@ -774,9 +675,9 @@ app.get("/signup", (req, res) => {
 
 app.post("/signup", async (req, res) => {
   try {
-    const email = qStr(req.body.email).toLowerCase();
+    const email = safeEqLower(req.body.email);
     const password = String(req.body.password || "");
-    const role = qStr(req.body.role || "SHIPPER").toUpperCase();
+    const role = String(req.body.role || "SHIPPER").toUpperCase();
 
     if (!email || password.length < 8) return res.status(400).send("Password must be at least 8 characters.");
     if (!["SHIPPER", "CARRIER"].includes(role)) return res.status(400).send("Invalid role.");
@@ -795,16 +696,12 @@ app.post("/signup", async (req, res) => {
         [r.rows[0].id, monthKey()]
       );
     } else {
-      await pool.query(
-        `INSERT INTO carriers_compliance (carrier_id,status) VALUES ($1,'PENDING') ON CONFLICT DO NOTHING`,
-        [r.rows[0].id]
-      );
-      await pool.query(`INSERT INTO carrier_preferences (carrier_id) VALUES ($1) ON CONFLICT DO NOTHING`, [r.rows[0].id]);
+      await pool.query(`INSERT INTO carriers_compliance (carrier_id,status) VALUES ($1,'PENDING') ON CONFLICT DO NOTHING`, [r.rows[0].id]);
     }
 
     signIn(res, r.rows[0]);
-    if (role === "CARRIER") return res.redirect("/carrier/onboarding");
-    return res.redirect("/dashboard");
+    // carriers must verify: send directly to dashboard where upload panel is shown
+    res.redirect("/dashboard");
   } catch (e) {
     if (String(e).toLowerCase().includes("duplicate")) return res.status(409).send("Email already exists. Go to /login.");
     console.error(e);
@@ -823,178 +720,216 @@ app.get("/login", (req, res) => {
         <div class="filters" style="grid-template-columns:1.2fr 1.2fr 1fr 1fr 1fr">
           <input name="email" type="email" placeholder="Email" required />
           <input name="password" type="password" placeholder="Password" required />
-          <button class="btn primary" type="submit">Login</button>
+          <button class="btn green" type="submit">Login</button>
           <a class="btn ghost" href="/signup">Create</a>
           <a class="btn ghost" href="/loads">Load Board</a>
         </div>
       </form>
+      <div class="hr"></div>
+      <div class="row">
+        <a class="btn ghost" href="/forgot">Forgot password?</a>
+      </div>
     </div>`
   }));
 });
+
 app.post("/login", async (req, res) => {
   try {
-    const email = qStr(req.body.email).toLowerCase();
+    const email = safeEqLower(req.body.email);
     const password = String(req.body.password || "");
     const r = await pool.query("SELECT id,email,password_hash,role FROM users WHERE email=$1", [email]);
     const u = r.rows[0];
     if (!u) return res.status(401).send("No account found. Go to /signup.");
     const ok = await bcrypt.compare(password, u.password_hash);
     if (!ok) return res.status(401).send("Wrong password.");
-
     signIn(res, u);
-
-    if (u.role === "CARRIER") {
-      const comp = await pool.query(`SELECT * FROM carriers_compliance WHERE carrier_id=$1`, [u.id]);
-      const c = comp.rows[0];
-      const missingDocs = !c?.insurance_filename || !c?.authority_filename || !c?.w9_filename;
-      if (missingDocs) return res.redirect("/carrier/onboarding");
-    }
-
     res.redirect("/dashboard");
   } catch (e) {
     console.error(e);
     res.status(500).send("Login failed.");
   }
 });
+
 app.get("/logout", (req, res) => { res.clearCookie("dfx_token"); res.redirect("/"); });
 
-/* ---------------- Carrier onboarding ---------------- */
-app.get("/carrier/onboarding", requireAuth, requireRole("CARRIER"), async (req, res) => {
-  const user = req.user;
-  const comp = await pool.query(`SELECT * FROM carriers_compliance WHERE carrier_id=$1`, [user.id]);
-  const c = comp.rows[0] || { status: "PENDING" };
-
-  const missing = !c.insurance_filename || !c.authority_filename || !c.w9_filename;
-
+/* ---------------- Forgot password ---------------- */
+app.get("/forgot", (req, res) => {
+  const user = getUser(req);
   const body = `
     <div class="card">
-      <h2 style="margin-top:0">Carrier Verification (Required)</h2>
-      <div class="muted">Upload compliance docs to earn the Verified badge and unlock requesting loads.</div>
+      <h2 style="margin-top:0">Reset Password</h2>
+      <div class="muted">Enter your account email. We’ll send a password reset link.</div>
       <div class="hr"></div>
-
-      <div class="row">
-        <span class="badge ${c.status === "APPROVED" ? "ok" : "warn"}">Status: ${escapeHtml(c.status || "PENDING")}</span>
-        ${missing ? `<span class="badge warn">Docs required</span>` : `<span class="badge ok">Docs submitted</span>`}
-        ${s3Enabled ? `<span class="badge ok">Docs stored in S3</span>` : `<span class="badge warn">S3 not configured (uploads won’t persist across deploys)</span>`}
-      </div>
-
-      <div class="hr"></div>
-
-      <form method="POST" action="/carrier/compliance" enctype="multipart/form-data">
-        <div class="filters" style="grid-template-columns:1.2fr 1.2fr 1fr 1fr 1fr">
-          <input name="insurance_expires" placeholder="Insurance expires (YYYY-MM-DD)" value="${escapeHtml(c.insurance_expires || "")}" required />
-          <input type="file" name="insurance" accept="application/pdf,image/*" required />
-          <input type="file" name="authority" accept="application/pdf,image/*" required />
-          <input type="file" name="w9" accept="application/pdf,image/*" required />
-          <button class="btn primary" type="submit">Submit for Verification</button>
+      <form method="POST" action="/forgot">
+        <div class="filters" style="grid-template-columns:1.4fr 1fr 1fr">
+          <input name="email" type="email" placeholder="Email" required />
+          <button class="btn green" type="submit">Send reset link</button>
+          <a class="btn ghost" href="/login">Back to login</a>
         </div>
       </form>
-
-      <div class="hr"></div>
-      <div class="row">
-        <a class="btn ghost" href="/support">Need help?</a>
-        <a class="btn ghost" href="/loads">View Load Board</a>
+      <div class="muted" style="margin-top:10px">
+        ${getMailer() ? `Email is enabled.` : `Email sending is not enabled yet (missing SMTP_* env vars).`}
       </div>
     </div>
   `;
-  res.send(layout({ title: "Carrier Verification", user, body }));
+  res.send(layout({ title: "Forgot Password", user, body }));
 });
 
-app.post(
-  "/carrier/compliance",
-  requireAuth,
-  requireRole("CARRIER"),
-  upload.fields([{ name: "insurance", maxCount: 1 }, { name: "authority", maxCount: 1 }, { name: "w9", maxCount: 1 }]),
-  async (req, res) => {
-    try {
-      const files = req.files || {};
-      const insurance = files.insurance?.[0];
-      const authority = files.authority?.[0];
-      const w9 = files.w9?.[0];
-      const insurance_expires = qStr(req.body.insurance_expires);
+app.post("/forgot", async (req, res) => {
+  const email = safeEqLower(req.body.email);
+  if (!email) return res.status(400).send("Email required.");
 
-      if (!insurance || !authority || !w9) return res.status(400).send("All 3 documents are required.");
-      if (!insurance_expires) return res.status(400).send("Insurance expiration is required.");
+  const u = (await pool.query(`SELECT id,email FROM users WHERE email=$1`, [email])).rows[0];
+  // Always respond same to prevent account enumeration
+  if (!u) return res.send(layout({ title: "Reset Sent", user: null, body: `<div class="card"><h2>Check your email</h2><div class="muted">If an account exists, a reset link has been sent.</div></div>` }));
 
-      let insurance_s3_key = null, authority_s3_key = null, w9_s3_key = null;
-      let insurance_s3_url = null, authority_s3_url = null, w9_s3_url = null;
+  const token = crypto.randomBytes(32).toString("hex");
+  const expiresAt = new Date(Date.now() + 1000 * 60 * 30); // 30 min
 
-      if (s3Enabled) {
-        const k1 = s3KeyForCarrierDoc(req.user.id, "insurance", insurance.originalname);
-        const k2 = s3KeyForCarrierDoc(req.user.id, "authority", authority.originalname);
-        const k3 = s3KeyForCarrierDoc(req.user.id, "w9", w9.originalname);
+  await pool.query(
+    `INSERT INTO password_resets (token,user_id,expires_at,used) VALUES ($1,$2,$3,false)`,
+    [token, u.id, expiresAt]
+  );
 
-        const u1 = await uploadBufferToS3({ key: k1, buffer: insurance.buffer, contentType: insurance.mimetype });
-        const u2 = await uploadBufferToS3({ key: k2, buffer: authority.buffer, contentType: authority.mimetype });
-        const u3 = await uploadBufferToS3({ key: k3, buffer: w9.buffer, contentType: w9.mimetype });
+  const link = `${APP_URL}/reset?token=${encodeURIComponent(token)}`;
 
-        insurance_s3_key = u1.key; insurance_s3_url = u1.url || null;
-        authority_s3_key = u2.key; authority_s3_url = u2.url || null;
-        w9_s3_key = u3.key; w9_s3_url = u3.url || null;
-      }
+  await sendEmail(
+    u.email,
+    "DFX Password Reset",
+    `<p>Click the link below to reset your password:</p>
+     <p><a href="${escapeHtml(link)}">${escapeHtml(link)}</a></p>
+     <p>This link expires in 30 minutes.</p>`
+  );
 
-      await pool.query(
-        `INSERT INTO carriers_compliance
-          (carrier_id, insurance_filename, authority_filename, w9_filename, insurance_expires,
-           insurance_s3_key, authority_s3_key, w9_s3_key,
-           insurance_s3_url, authority_s3_url, w9_s3_url,
-           status, updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'PENDING',NOW())
-         ON CONFLICT (carrier_id) DO UPDATE SET
-           insurance_filename=EXCLUDED.insurance_filename,
-           authority_filename=EXCLUDED.authority_filename,
-           w9_filename=EXCLUDED.w9_filename,
-           insurance_expires=EXCLUDED.insurance_expires,
-           insurance_s3_key=EXCLUDED.insurance_s3_key,
-           authority_s3_key=EXCLUDED.authority_s3_key,
-           w9_s3_key=EXCLUDED.w9_s3_key,
-           insurance_s3_url=EXCLUDED.insurance_s3_url,
-           authority_s3_url=EXCLUDED.authority_s3_url,
-           w9_s3_url=EXCLUDED.w9_s3_url,
-           status='PENDING',
-           updated_at=NOW()`,
-        [
-          req.user.id,
-          insurance.originalname,
-          authority.originalname,
-          w9.originalname,
-          insurance_expires,
-          insurance_s3_key, authority_s3_key, w9_s3_key,
-          insurance_s3_url, authority_s3_url, w9_s3_url,
-        ]
-      );
-
-      res.redirect("/carrier/onboarding");
-    } catch (e) {
-      console.error("Carrier compliance upload failed:", e);
-      res.status(500).send("Upload failed.");
-    }
-  }
-);
-
-app.get("/carrier/docs/:type", requireAuth, requireRole("CARRIER"), async (req, res) => {
-  const type = qStr(req.params.type).toLowerCase();
-  if (!["insurance", "authority", "w9"].includes(type)) return res.sendStatus(404);
-
-  const r = await pool.query(`SELECT * FROM carriers_compliance WHERE carrier_id=$1`, [req.user.id]);
-  const c = r.rows[0];
-  if (!c) return res.sendStatus(404);
-
-  const key =
-    type === "insurance" ? c.insurance_s3_key :
-    type === "authority" ? c.authority_s3_key :
-    c.w9_s3_key;
-
-  if (!key) return res.status(404).send("Document not found.");
-
-  const publicUrl = publicUrlForKey(key);
-  if (publicUrl) return res.redirect(302, publicUrl);
-  if (!s3Enabled) return res.status(500).send("S3 not configured.");
-
-  return streamS3ObjectToRes(key, res);
+  res.send(layout({
+    title: "Reset Sent",
+    user: null,
+    body: `<div class="card"><h2 style="margin-top:0">Check your email</h2><div class="muted">If an account exists, a reset link has been sent.</div><div class="hr"></div><a class="btn green" href="/login">Back to login</a></div>`
+  }));
 });
 
-/* ---------------- Shipper plans ---------------- */
+app.get("/reset", async (req, res) => {
+  const user = getUser(req);
+  const token = String(req.query.token || "");
+  if (!token) return res.status(400).send("Missing token.");
+
+  const r = await pool.query(`SELECT * FROM password_resets WHERE token=$1`, [token]);
+  const pr = r.rows[0];
+  const valid = pr && !pr.used && new Date(pr.expires_at).getTime() > Date.now();
+
+  const body = `
+    <div class="card">
+      <h2 style="margin-top:0">Set New Password</h2>
+      ${valid ? `
+        <form method="POST" action="/reset">
+          <input type="hidden" name="token" value="${escapeHtml(token)}" />
+          <div class="filters" style="grid-template-columns:1.2fr 1fr 1fr">
+            <input name="password" type="password" placeholder="New password (min 8 chars)" minlength="8" required />
+            <button class="btn green" type="submit">Update password</button>
+            <a class="btn ghost" href="/login">Cancel</a>
+          </div>
+        </form>
+      ` : `
+        <div class="badge warn">Reset link is invalid or expired. Please request a new one.</div>
+        <div class="hr"></div>
+        <a class="btn green" href="/forgot">Request new link</a>
+      `}
+    </div>
+  `;
+  res.send(layout({ title: "Reset Password", user, body }));
+});
+
+app.post("/reset", async (req, res) => {
+  const token = String(req.body.token || "");
+  const password = String(req.body.password || "");
+  if (!token || password.length < 8) return res.status(400).send("Invalid request.");
+
+  const r = await pool.query(`SELECT * FROM password_resets WHERE token=$1`, [token]);
+  const pr = r.rows[0];
+  const valid = pr && !pr.used && new Date(pr.expires_at).getTime() > Date.now();
+  if (!valid) return res.status(400).send("Token expired or invalid.");
+
+  const hash = await bcrypt.hash(password, 12);
+  await pool.query(`UPDATE users SET password_hash=$1 WHERE id=$2`, [hash, pr.user_id]);
+  await pool.query(`UPDATE password_resets SET used=true WHERE token=$1`, [token]);
+
+  res.send(layout({
+    title: "Password Updated",
+    user: null,
+    body: `<div class="card"><h2 style="margin-top:0">Password updated</h2><div class="muted">You can now log in with your new password.</div><div class="hr"></div><a class="btn green" href="/login">Go to login</a></div>`
+  }));
+});
+
+/* ---------------- Home ---------------- */
+app.get("/", (req, res) => {
+  const user = getUser(req);
+
+  const plansCta =
+    user?.role === "SHIPPER"
+      ? `<a class="btn green" href="/shipper/plans">View Plans</a>`
+      : `<a class="btn green" href="/signup">Sign up as Shipper</a>`;
+
+  const body = `
+    <div class="hero">
+      <div class="heroInner">
+        <div class="row">
+          <span class="badge brand">All-In Pricing</span>
+          <span class="badge brand">Carrier Verified</span>
+          <span class="badge brand">Direct Booking</span>
+        </div>
+
+        <h2 class="title" style="margin-top:12px">No hidden rates. No phone calls. No broker games.</h2>
+        <div class="muted" style="max-width:880px">
+          DFX connects shippers and carriers directly with fully transparent loads:
+          <b>all-in rate</b>, <b>payment terms</b>, <b>detention</b>, <b>accessorials</b>, appointment type, and notes —
+          visible up front so carriers can commit fast and shippers can book with confidence.
+        </div>
+
+        <div class="hr"></div>
+
+        <div class="row">
+          <a class="btn green" href="${user ? "/dashboard" : "/signup"}">${user ? "Go to Dashboard" : "Create account"}</a>
+          <a class="btn ghost" href="/loads">Browse Load Board</a>
+          <a class="btn ghost" href="/terms">Terms / Disclaimer</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h3 style="margin-top:0">For Shippers</h3>
+        <div class="muted">
+          Post loads with everything included — rate, terms, detention, accessorials — so carriers can book faster.
+          Choose a plan based on your monthly volume.
+        </div>
+        <div class="hr"></div>
+        <div class="row">
+          <span class="badge ok">Starter: 15 loads</span>
+          <span class="badge ok">Growth: 30 loads</span>
+          <span class="badge ok">Enterprise: Unlimited</span>
+          ${plansCta}
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 style="margin-top:0">For Carriers</h3>
+        <div class="muted">
+          Free access to transparent loads. Upload compliance docs once, get verified, and request loads directly.
+        </div>
+        <div class="hr"></div>
+        <div class="row">
+          <span class="badge brand">Verified badge</span>
+          <span class="badge brand">Request-to-Book</span>
+          <span class="badge brand">Transparent terms</span>
+        </div>
+      </div>
+    </div>
+  `;
+
+  res.send(layout({ title: "DFX", user, body }));
+});
+
+/* ---------------- Stripe routes (plans + invoices/receipts) ---------------- */
 app.get("/shipper/plans", requireAuth, requireRole("SHIPPER"), async (req, res) => {
   const user = req.user;
   const bill = await pool.query(`SELECT * FROM shippers_billing WHERE shipper_id=$1`, [user.id]);
@@ -1020,19 +955,13 @@ app.get("/shipper/plans", requireAuth, requireRole("SHIPPER"), async (req, res) 
         <span class="badge">Plan: ${escapeHtml(plan || "None")}</span>
         <span class="badge">Month: ${escapeHtml(usageMonth)}</span>
         <span class="badge brand">${escapeHtml(usageText)}</span>
+        <a class="btn ghost" href="/shipper/invoices">Invoices / Receipts</a>
       </div>
 
       ${!stripeEnabled ? `
         <div class="hr"></div>
         <div class="badge warn">Stripe not configured (add STRIPE_* env vars in Render).</div>
       ` : `
-        <div class="hr"></div>
-        <div class="row">
-          <form method="POST" action="/shipper/billing/portal">
-            <button class="btn ghost" type="submit">Invoices / Receipts (Billing Portal)</button>
-          </form>
-        </div>
-
         <div class="hr"></div>
         <div class="grid">
           ${Object.keys(PLANS).map(p => {
@@ -1054,7 +983,7 @@ app.get("/shipper/plans", requireAuth, requireRole("SHIPPER"), async (req, res) 
                   : `
                     <form method="POST" action="/shipper/plan">
                       <input type="hidden" name="plan" value="${p}">
-                      <button class="btn primary" type="submit">${status === "ACTIVE" ? "Switch immediately" : "Subscribe"}</button>
+                      <button class="btn green" type="submit">${status === "ACTIVE" ? "Switch immediately" : "Subscribe"}</button>
                     </form>
                   `}
               </div>
@@ -1070,7 +999,7 @@ app.get("/shipper/plans", requireAuth, requireRole("SHIPPER"), async (req, res) 
 app.post("/shipper/plan", requireAuth, requireRole("SHIPPER"), async (req, res) => {
   if (!stripeEnabled) return res.status(400).send("Stripe not configured.");
 
-  const plan = qStr(req.body.plan).toUpperCase();
+  const plan = String(req.body.plan || "").toUpperCase();
   if (!PLANS[plan]) return res.status(400).send("Invalid plan.");
   const targetPriceId = priceIdForPlan(plan);
 
@@ -1099,28 +1028,70 @@ app.post("/shipper/plan", requireAuth, requireRole("SHIPPER"), async (req, res) 
   });
 
   const planDef = PLANS[plan];
-  await pool.query(`UPDATE shippers_billing SET plan=$1, monthly_limit=$2, updated_at=NOW() WHERE shipper_id=$3`,
+  await pool.query(
+    `UPDATE shippers_billing SET plan=$1, monthly_limit=$2, updated_at=NOW() WHERE shipper_id=$3`,
     [plan, planDef.limit, req.user.id]
   );
 
   res.redirect("/shipper/plans?switched=1");
 });
 
-app.post("/shipper/billing/portal", requireAuth, requireRole("SHIPPER"), async (req, res) => {
-  if (!stripeEnabled) return res.status(400).send("Stripe not configured.");
+// Invoices / receipts: list Stripe invoices and provide download links
+app.get("/shipper/invoices", requireAuth, requireRole("SHIPPER"), async (req, res) => {
+  const user = req.user;
 
-  const bill = await pool.query(`SELECT * FROM shippers_billing WHERE shipper_id=$1`, [req.user.id]);
-  const b = bill.rows[0];
-  if (!b?.stripe_customer_id) return res.status(400).send("No Stripe customer yet. Subscribe first.");
+  const bill = await pool.query(`SELECT * FROM shippers_billing WHERE shipper_id=$1`, [user.id]);
+  const b = bill.rows[0] || null;
 
-  const session = await stripe.billingPortal.sessions.create({
-    customer: b.stripe_customer_id,
-    return_url: STRIPE_PORTAL_RETURN_URL,
-  });
+  if (!stripeEnabled) {
+    return res.send(layout({
+      title: "Invoices",
+      user,
+      body: `<div class="card"><h2 style="margin-top:0">Invoices / Receipts</h2><div class="badge warn">Stripe is not configured yet.</div></div>`
+    }));
+  }
 
-  return res.redirect(303, session.url);
+  if (!b?.stripe_customer_id) {
+    return res.send(layout({
+      title: "Invoices",
+      user,
+      body: `<div class="card"><h2 style="margin-top:0">Invoices / Receipts</h2><div class="muted">No Stripe customer found yet. Subscribe to a plan first.</div><div class="hr"></div><a class="btn green" href="/shipper/plans">Go to Plans</a></div>`
+    }));
+  }
+
+  const inv = await stripe.invoices.list({ customer: b.stripe_customer_id, limit: 24 });
+
+  const body = `
+    <div class="card">
+      <h2 style="margin-top:0">Invoices / Receipts</h2>
+      <div class="muted">Download invoices and receipts for your subscription.</div>
+      <div class="hr"></div>
+      ${inv.data.length ? inv.data.map(i => {
+        const hosted = i.hosted_invoice_url ? `<a class="btn ghost" href="${i.hosted_invoice_url}" target="_blank" rel="noreferrer">View</a>` : "";
+        const pdf = i.invoice_pdf ? `<a class="btn green" href="${i.invoice_pdf}" target="_blank" rel="noreferrer">Download PDF</a>` : "";
+        return `
+          <div class="load">
+            <div class="row" style="justify-content:space-between">
+              <div>
+                <div style="font-weight:1000">Invoice ${escapeHtml(i.number || i.id)}</div>
+                <div class="muted">${escapeHtml(i.status || "")} • ${money((i.amount_paid || i.amount_due || 0) / 100)} • ${new Date((i.created || 0) * 1000).toISOString().slice(0,10)}</div>
+              </div>
+              <div class="row">
+                ${hosted}
+                ${pdf}
+              </div>
+            </div>
+          </div>
+        `;
+      }).join("") : `<div class="muted">No invoices found yet.</div>`}
+      <div class="hr"></div>
+      <a class="btn ghost" href="/shipper/plans">Back to Plans</a>
+    </div>
+  `;
+  res.send(layout({ title: "Invoices", user, body }));
 });
 
+/* ---------------- Stripe webhook ---------------- */
 app.post("/stripe/webhook", async (req, res) => {
   if (!stripeEnabled) return res.sendStatus(400);
 
@@ -1162,10 +1133,14 @@ app.post("/stripe/webhook", async (req, res) => {
       const customerId = sub.customer;
       const priceId = sub.items?.data?.[0]?.price?.id;
 
-      const row = await pool.query(`SELECT shipper_id FROM shippers_billing WHERE stripe_subscription_id=$1`, [subscriptionId]);
+      const row = await pool.query(
+        `SELECT shipper_id FROM shippers_billing WHERE stripe_subscription_id=$1`,
+        [subscriptionId]
+      );
       const shipperId =
         row.rows[0]?.shipper_id ||
-        (await pool.query(`SELECT shipper_id FROM shippers_billing WHERE stripe_customer_id=$1`, [customerId])).rows[0]?.shipper_id;
+        (await pool.query(`SELECT shipper_id FROM shippers_billing WHERE stripe_customer_id=$1`, [customerId])).rows[0]
+          ?.shipper_id;
 
       if (shipperId) {
         await upsertBillingFromSubscription({
@@ -1185,334 +1160,246 @@ app.post("/stripe/webhook", async (req, res) => {
   }
 });
 
-/* ---------------- Load alerts (saved searches) ---------------- */
-async function notifySavedSearchesAboutLoad(loadRow) {
-  const t = getMailer();
-  if (!t) return;
-
-  const searches = await pool.query(`
-    SELECT css.*, u.email as carrier_email
-    FROM carrier_saved_searches css
-    JOIN users u ON u.id = css.carrier_id
-    WHERE css.only_open = true
-  `);
-
-  for (const s of searches.rows.slice(0, 200)) {
-    if (Array.isArray(s.equips) && s.equips.length && !s.equips.includes(loadRow.equipment)) continue;
-    if (s.origin && !String(loadRow.lane_from || "").toLowerCase().includes(String(s.origin).toLowerCase())) continue;
-    if (s.dest && !String(loadRow.lane_to || "").toLowerCase().includes(String(s.dest).toLowerCase())) continue;
-
-    if (s.min_miles != null && int(loadRow.miles) < int(s.min_miles)) continue;
-    if (s.max_miles != null && int(loadRow.miles) > int(s.max_miles)) continue;
-
-    if (s.min_weight != null && int(loadRow.weight_lbs) < int(s.min_weight)) continue;
-    if (s.max_weight != null && int(loadRow.weight_lbs) > int(s.max_weight)) continue;
-
-    if (s.pickup_from && String(loadRow.pickup_date) < String(s.pickup_from)) continue;
-    if (s.pickup_to && String(loadRow.pickup_date) > String(s.pickup_to)) continue;
-
-    await sendEmail(
-      s.carrier_email,
-      `DFX Load Match • ${loadRow.lane_from} → ${loadRow.lane_to}`,
-      `<p><b>New matching load posted.</b></p>
-       <p>${escapeHtml(loadRow.lane_from)} → ${escapeHtml(loadRow.lane_to)}</p>
-       <p>${escapeHtml(loadRow.equipment)} • ${int(loadRow.weight_lbs).toLocaleString()} lbs • ${int(loadRow.miles).toLocaleString()} mi</p>
-       <p>Rate: ${money(loadRow.rate_all_in)} all-in • Pickup: ${escapeHtml(loadRow.pickup_date)}</p>
-       <p><a href="${APP_URL}/loads">Open Load Board</a></p>`
-    );
-  }
-}
-
-/* ---------------- Dashboard ---------------- */
+/* ---------------- Dashboards ---------------- */
 app.get("/dashboard", requireAuth, async (req, res) => {
-  const user = req.user;
+  try {
+    const user = req.user;
 
-  if (user.role === "SHIPPER") {
-    const billing = await getAndNormalizeBilling(user.id);
-    const gate = postingAllowed(billing);
+    if (user.role === "SHIPPER") {
+      const billing = await getAndNormalizeBilling(user.id);
+      const gate = postingAllowed(billing);
 
-    const planLabel = billing.plan ? PLANS[billing.plan]?.label : "None";
-    const limitText =
-      billing.monthly_limit === -1 ? "Unlimited" :
-      `${billing.loads_used} / ${billing.monthly_limit} used this month`;
+      const planLabel = billing.plan ? (PLANS[billing.plan]?.label || billing.plan) : "None";
+      const limitText =
+        billing.monthly_limit === -1 ? "Unlimited" :
+        `${billing.loads_used} / ${billing.monthly_limit} used this month`;
 
-    const myLoads = await pool.query(`SELECT * FROM loads WHERE shipper_id=$1 ORDER BY created_at DESC`, [user.id]);
+      const myLoads = await pool.query(`SELECT * FROM loads WHERE shipper_id=$1 ORDER BY created_at DESC`, [user.id]);
 
-    const requests = await pool.query(`
-      SELECT lr.id as request_id, lr.status as request_status, lr.created_at,
-             lr.carrier_id,
-             l.id as load_id, l.lane_from, l.lane_to,
-             u.email as carrier_email,
-             cc.status as carrier_compliance
-      FROM load_requests lr
-      JOIN loads l ON l.id = lr.load_id
-      JOIN users u ON u.id = lr.carrier_id
-      LEFT JOIN carriers_compliance cc ON cc.carrier_id = lr.carrier_id
-      WHERE l.shipper_id=$1
-      ORDER BY lr.created_at DESC
-    `, [user.id]);
+      const requests = await pool.query(`
+        SELECT lr.id as request_id, lr.status as request_status, lr.created_at,
+               lr.carrier_id,
+               l.id as load_id, l.lane_from, l.lane_to,
+               u.email as carrier_email,
+               cc.status as carrier_compliance
+        FROM load_requests lr
+        JOIN loads l ON l.id = lr.load_id
+        JOIN users u ON u.id = lr.carrier_id
+        LEFT JOIN carriers_compliance cc ON cc.carrier_id = lr.carrier_id
+        WHERE l.shipper_id=$1
+        ORDER BY lr.created_at DESC
+      `, [user.id]);
 
-    const body = `
-      <div class="grid">
+      const body = `
+        <div class="grid">
+          <div class="card">
+            <div class="row" style="justify-content:space-between">
+              <div>
+                <h2 style="margin:0">Shipper Dashboard</h2>
+                <div class="muted">All-in pricing. Transparent terms. Fast booking.</div>
+              </div>
+              <span class="badge ${billing.status === "ACTIVE" ? "ok" : "warn"}">Billing: ${escapeHtml(billing.status)}</span>
+            </div>
+
+            <div class="hr"></div>
+
+            <div class="row">
+              <span class="badge">Plan: ${escapeHtml(planLabel)}</span>
+              <span class="badge brand">${escapeHtml(limitText)}</span>
+              <a class="btn green" href="/shipper/plans">Manage Plan</a>
+              <a class="btn ghost" href="/shipper/invoices">Invoices / Receipts</a>
+            </div>
+
+            <div class="hr"></div>
+
+            <h3 style="margin:0 0 10px 0">Post a transparent load</h3>
+
+            ${gate.ok ? `
+            <form method="POST" action="/shipper/loads">
+              <div class="filters">
+                <input name="lane_from" placeholder="From (City, ST)" required />
+                <input name="lane_to" placeholder="To (City, ST)" required />
+                <input name="pickup_date" placeholder="Pickup date (YYYY-MM-DD)" required />
+                <input name="delivery_date" placeholder="Delivery date (YYYY-MM-DD)" required />
+                <select name="equipment" required>
+                  ${equipmentOptionsHtml("Dry Van")}
+                </select>
+
+                <input name="weight_lbs" type="number" placeholder="Weight (lbs)" value="42000" required />
+                <input name="miles" type="number" placeholder="Miles" value="800" required />
+                <input name="commodity" placeholder="Commodity" value="General Freight" required />
+                <input name="rate_all_in" type="number" step="0.01" placeholder="All-in rate ($)" value="2500" required />
+                <select name="payment_terms" required>
+                  <option value="NET 30">NET 30 (default)</option><option value="NET 15">NET 15</option><option value="NET 45">NET 45</option><option value="QuickPay">QuickPay</option>
+                </select>
+
+                <select name="quickpay_available" required>
+                  <option value="false">QuickPay Available? No</option><option value="true">QuickPay Available? Yes</option>
+                </select>
+
+                <input name="detention_rate_per_hr" type="number" step="0.01" placeholder="Detention $/hr" value="75" required />
+                <input name="detention_after_hours" type="number" placeholder="Detention after (hours)" value="2" required />
+                <select name="appointment_type" required>
+                  <option value="FCFS">Appointment: FCFS</option><option value="Appt Required">Appointment: Appt Required</option>
+                </select>
+
+                <input name="accessorials" placeholder="Accessorials" value="None" required />
+                <input name="special_requirements" placeholder="Notes" value="None" required />
+              </div>
+              <div class="row" style="margin-top:12px">
+                <button class="btn green" type="submit">Post Load</button>
+                <a class="btn ghost" href="/loads">View Load Board</a>
+              </div>
+            </form>
+            ` : `
+              <div class="badge warn">Posting blocked: ${escapeHtml(gate.reason)}</div>
+              <div class="row" style="margin-top:10px">
+                <a class="btn green" href="/shipper/plans">Upgrade / Subscribe</a>
+              </div>
+            `}
+          </div>
+
+          <div class="card">
+            <h3 style="margin-top:0">Booking Requests</h3>
+            <div class="muted">Carrier requests → you accept/decline → load becomes BOOKED.</div>
+            <div class="hr"></div>
+            ${requests.rows.length ? requests.rows.map(r => `
+              <div class="load">
+                <div class="row" style="justify-content:space-between">
+                  <div><b>Load #${r.load_id}</b> ${escapeHtml(r.lane_from)} → ${escapeHtml(r.lane_to)}</div>
+                  <span class="badge ${r.request_status === "REQUESTED" ? "warn" : r.request_status === "ACCEPTED" ? "ok" : ""}">${escapeHtml(r.request_status)}</span>
+                </div>
+                <div class="muted">Carrier: ${escapeHtml(r.carrier_email)} • Compliance: ${escapeHtml(r.carrier_compliance || "PENDING")}</div>
+                ${r.request_status === "REQUESTED" ? `
+                  <div class="row" style="margin-top:10px">
+                    <form method="POST" action="/shipper/requests/${r.request_id}/accept"><button class="btn green" type="submit">Accept</button></form>
+                    <form method="POST" action="/shipper/requests/${r.request_id}/decline"><button class="btn ghost" type="submit">Decline</button></form>
+                  </div>` : ``}
+              </div>
+            `).join("") : `<div class="muted">No requests yet.</div>`}
+          </div>
+        </div>
+
+        <div class="card">
+          <h3 style="margin-top:0">Your Loads</h3>
+          <div class="muted">For BOOKED loads, you can generate an auto-filled rate confirmation.</div>
+          <div class="hr"></div>
+          ${myLoads.rows.length ? myLoads.rows.map(l => loadCard(l, user)).join("") : `<div class="muted">No loads yet.</div>`}
+        </div>
+      `;
+      return res.send(layout({ title: "Dashboard", user, body }));
+    }
+
+    if (user.role === "CARRIER") {
+      const comp = await pool.query(`SELECT * FROM carriers_compliance WHERE carrier_id=$1`, [user.id]);
+      const c = comp.rows[0] || { status: "PENDING" };
+
+      const myReqs = await pool.query(`
+        SELECT lr.*, l.lane_from, l.lane_to, l.status as load_status
+        FROM load_requests lr
+        JOIN loads l ON l.id = lr.load_id
+        WHERE lr.carrier_id=$1
+        ORDER BY lr.created_at DESC
+      `, [user.id]);
+
+      const body = `
+        <div class="grid">
+          <div class="card">
+            <div class="row" style="justify-content:space-between">
+              <div>
+                <h2 style="margin:0">Carrier Dashboard</h2>
+                <div class="muted">Create account → upload compliance → get Verified badge.</div>
+              </div>
+              <span class="badge ${c.status === "APPROVED" ? "ok" : "warn"}">Verification: ${escapeHtml(c.status)}</span>
+            </div>
+
+            <div class="hr"></div>
+
+            <div class="muted" style="margin-bottom:10px">
+              To become <b>Verified</b>, upload:
+              <ul>
+                <li><b>W-9</b></li>
+                <li><b>Certificate of Insurance</b> (Auto Liability + Cargo)</li>
+                <li><b>Operating Authority</b> (MC / DOT proof)</li>
+              </ul>
+            </div>
+
+            <form method="POST" action="/carrier/compliance" enctype="multipart/form-data">
+              <div class="filters" style="grid-template-columns:1.2fr 1.2fr 1fr 1fr 1fr">
+                <input name="insurance_expires" placeholder="Insurance expires (YYYY-MM-DD)" value="${escapeHtml(c.insurance_expires || "")}" required />
+                <input type="file" name="insurance" accept="application/pdf,image/*" required />
+                <input type="file" name="authority" accept="application/pdf,image/*" required />
+                <input type="file" name="w9" accept="application/pdf,image/*" required />
+                <button class="btn green" type="submit">Submit for Verification</button>
+              </div>
+              <div class="muted" style="margin-top:10px">
+                Files are recorded by name in the database. For production, store uploads in S3 and save URLs.
+              </div>
+            </form>
+          </div>
+
+          <div class="card">
+            <h3 style="margin-top:0">Your Requests</h3>
+            <div class="hr"></div>
+            ${myReqs.rows.length ? myReqs.rows.map(r => `
+              <div class="load">
+                <div class="row" style="justify-content:space-between">
+                  <div><b>Load #${r.load_id}</b> ${escapeHtml(r.lane_from)} → ${escapeHtml(r.lane_to)}</div>
+                  <span class="badge ${r.status === "REQUESTED" ? "warn" : r.status === "ACCEPTED" ? "ok" : ""}">${escapeHtml(r.status)}</span>
+                </div>
+                <div class="muted">Load status: ${escapeHtml(r.load_status)}</div>
+              </div>
+            `).join("") : `<div class="muted">No requests yet.</div>`}
+          </div>
+        </div>
+
         <div class="card">
           <div class="row" style="justify-content:space-between">
             <div>
-              <h2 style="margin:0">Shipper Dashboard</h2>
-              <div class="muted">Post transparent loads. Carriers see RPM + all terms by default.</div>
+              <h3 style="margin:0">Load Board</h3>
+              <div class="muted">Default: newest • Option: sort by RPM</div>
             </div>
-            <span class="badge ${billing.status === "ACTIVE" ? "ok" : "warn"}">Billing: ${escapeHtml(billing.status)}</span>
+            <a class="btn ghost" href="/loads">Open Load Board</a>
           </div>
+        </div>
+      `;
+      return res.send(layout({ title: "Carrier", user, body }));
+    }
 
-          <div class="hr"></div>
+    // ADMIN
+    const pending = await pool.query(`
+      SELECT cc.*, u.email
+      FROM carriers_compliance cc
+      JOIN users u ON u.id = cc.carrier_id
+      WHERE cc.status='PENDING'
+      ORDER BY cc.updated_at DESC
+    `);
 
-          <div class="row">
-            <span class="badge">Plan: ${escapeHtml(planLabel)}</span>
-            <span class="badge brand">${escapeHtml(limitText)}</span>
-            <a class="btn primary" href="/shipper/plans">Manage Plan</a>
-          </div>
-
-          <div class="hr"></div>
-
-          <h3 style="margin:0 0 10px 0">Post a transparent load</h3>
-
-          ${gate.ok ? `
-          <form method="POST" action="/shipper/loads">
-            <div class="filters">
-              <input name="lane_from" placeholder="From (City, ST)" required />
-              <input name="lane_to" placeholder="To (City, ST)" required />
-              <input name="pickup_date" placeholder="Pickup date (YYYY-MM-DD)" required />
-              <input name="delivery_date" placeholder="Delivery date (YYYY-MM-DD)" required />
-              <select name="equipment" required>
-                <option>Dry Van</option>
-                <option>Standard Van</option>
-                <option>Reefer</option>
-                <option>Flatbed</option>
-                <option>Power Only</option>
-                <option>Stepdeck</option>
-              </select>
-
-              <input name="weight_lbs" type="number" placeholder="Weight (lbs)" value="42000" required />
-              <input name="miles" type="number" placeholder="Miles" value="800" required />
-              <input name="commodity" placeholder="Commodity" value="General Freight" required />
-              <input name="rate_all_in" type="number" step="0.01" placeholder="All-in rate ($)" value="2500" required />
-              <select name="payment_terms" required>
-                <option value="NET 30">NET 30 (default)</option>
-                <option value="NET 15">NET 15</option>
-                <option value="NET 45">NET 45</option>
-                <option value="QuickPay">QuickPay</option>
-              </select>
-
-              <select name="quickpay_available" required>
-                <option value="false">QuickPay Available? No</option>
-                <option value="true">QuickPay Available? Yes</option>
-              </select>
-
-              <input name="detention_rate_per_hr" type="number" step="0.01" placeholder="Detention $/hr" value="75" required />
-              <input name="detention_after_hours" type="number" placeholder="Detention after (hours)" value="2" required />
-              <select name="appointment_type" required>
-                <option value="FCFS">Appointment: FCFS</option>
-                <option value="Appt Required">Appointment: Appt Required</option>
-              </select>
-
-              <input name="accessorials" placeholder="Accessorials" value="None" required />
-              <input name="special_requirements" placeholder="Notes" value="None" required />
+    const body = `
+      <div class="card">
+        <h2 style="margin-top:0">Admin — Carrier Verification</h2>
+        <div class="muted">Approve carriers to enable Request-to-Book + Verified badge.</div>
+        <div class="hr"></div>
+        ${pending.rows.length ? pending.rows.map(p => `
+          <div class="load">
+            <div class="row" style="justify-content:space-between">
+              <div><b>${escapeHtml(p.email)}</b> • Insurance exp: ${escapeHtml(p.insurance_expires || "—")}</div>
+              <span class="badge warn">PENDING</span>
             </div>
-            <div class="row" style="margin-top:12px">
-              <button class="btn primary" type="submit">Post Load</button>
-              <a class="btn ghost" href="/loads">View Load Board</a>
-            </div>
-          </form>
-          ` : `
-            <div class="badge warn">Posting blocked: ${escapeHtml(gate.reason)}</div>
+            <div class="muted">Files: ${escapeHtml(p.insurance_filename||"—")}, ${escapeHtml(p.authority_filename||"—")}, ${escapeHtml(p.w9_filename||"—")}</div>
             <div class="row" style="margin-top:10px">
-              <a class="btn primary" href="/shipper/plans">Upgrade / Subscribe</a>
+              <form method="POST" action="/admin/carriers/${p.carrier_id}/approve"><button class="btn green" type="submit">Approve</button></form>
+              <form method="POST" action="/admin/carriers/${p.carrier_id}/reject"><button class="btn ghost" type="submit">Reject</button></form>
             </div>
-          `}
-        </div>
-
-        <div class="card">
-          <h3 style="margin-top:0">Booking Requests</h3>
-          <div class="muted">Carrier requests → you accept/decline → load becomes BOOKED.</div>
-          <div class="hr"></div>
-          ${requests.rows.length ? requests.rows.map(r => `
-            <div style="margin-top:10px; padding:12px; border:1px solid rgba(255,255,255,.08); border-radius:14px; background:rgba(6,8,9,.55)">
-              <div class="row" style="justify-content:space-between">
-                <div><b>Load #${r.load_id}</b> ${escapeHtml(r.lane_from)} → ${escapeHtml(r.lane_to)}</div>
-                <span class="badge ${r.request_status === "REQUESTED" ? "warn" : r.request_status === "ACCEPTED" ? "ok" : ""}">${escapeHtml(r.request_status)}</span>
-              </div>
-              <div class="muted">Carrier: ${escapeHtml(r.carrier_email)} • Compliance: ${escapeHtml(r.carrier_compliance || "PENDING")}</div>
-              ${r.request_status === "REQUESTED" ? `
-                <div class="row" style="margin-top:10px">
-                  <form method="POST" action="/shipper/requests/${r.request_id}/accept"><button class="btn primary" type="submit">Accept</button></form>
-                  <form method="POST" action="/shipper/requests/${r.request_id}/decline"><button class="btn ghost" type="submit">Decline</button></form>
-                </div>` : ``}
-              ${r.request_status === "ACCEPTED" ? `
-                <div class="row" style="margin-top:10px">
-                  <a class="btn ghost" href="/shipper/loads/${r.load_id}/ratecon">Rate Confirmation</a>
-                </div>` : ``}
-            </div>
-          `).join("") : `<div class="muted">No requests yet.</div>`}
-        </div>
-      </div>
-
-      <div class="card">
-        <h3 style="margin-top:0">Contracts & Templates</h3>
-        <div class="muted">Starting points. Review with counsel for production use.</div>
-        <div class="hr"></div>
-        <div class="row">
-          <a class="btn ghost" href="/shipper/templates/rate-confirmation">Rate Confirmation Template</a>
-          <a class="btn ghost" href="/shipper/templates/carrier-setup">Carrier Setup Packet</a>
-          <a class="btn ghost" href="/shipper/templates/terms">Standard Load Terms</a>
-        </div>
-      </div>
-
-      <div class="card">
-        <h3 style="margin-top:0">Your Loads</h3>
-        <div class="hr"></div>
-        ${myLoads.rows.length ? myLoads.rows.map(l => shipperLoadRow(l)).join("") : `<div class="muted">No loads yet.</div>`}
+          </div>
+        `).join("") : `<div class="muted">No pending carriers.</div>`}
       </div>
     `;
-    return res.send(layout({ title: "Dashboard", user, body }));
+    return res.send(layout({ title: "Admin", user, body }));
+  } catch (e) {
+    console.error("Dashboard error:", e);
+    return res.status(500).send("Dashboard failed.");
   }
-
-  if (user.role === "CARRIER") {
-    const comp = await pool.query(`SELECT * FROM carriers_compliance WHERE carrier_id=$1`, [user.id]);
-    const c = comp.rows[0] || { status: "PENDING" };
-    const missingDocs = !c.insurance_filename || !c.authority_filename || !c.w9_filename;
-    if (missingDocs) return res.redirect("/carrier/onboarding");
-
-    const prefs = await pool.query(`SELECT * FROM carrier_preferences WHERE carrier_id=$1`, [user.id]);
-    const p = prefs.rows[0] || {};
-
-    const myReqs = await pool.query(`
-      SELECT lr.*, l.lane_from, l.lane_to, l.status as load_status
-      FROM load_requests lr
-      JOIN loads l ON l.id = lr.load_id
-      WHERE lr.carrier_id=$1
-      ORDER BY lr.created_at DESC
-    `, [user.id]);
-
-    const body = `
-      <div class="grid">
-        <div class="card">
-          <div class="row" style="justify-content:space-between">
-            <div>
-              <h2 style="margin:0">Carrier Dashboard</h2>
-              <div class="muted">Free access. Verified carriers can request loads.</div>
-            </div>
-            <span class="badge ${c.status === "APPROVED" ? "ok" : "warn"}">Compliance: ${escapeHtml(c.status)}</span>
-          </div>
-
-          <div class="hr"></div>
-
-          <div class="row">
-            <a class="btn primary" href="/loads">Load Board</a>
-            <a class="btn ghost" href="/carrier/onboarding">Update Docs</a>
-            <a class="btn ghost" href="/carrier/searches">Saved Searches</a>
-          </div>
-
-          <div class="hr"></div>
-
-          <h3 style="margin:0 0 10px 0">Carrier Preferences</h3>
-          <form method="POST" action="/carrier/preferences">
-            <div class="filters">
-              <input name="home_base" placeholder="Home base (City, ST)" value="${escapeHtml(p.home_base || "")}" />
-              <input name="preferred_equipment" placeholder="Preferred equipment (comma-separated)" value="${escapeHtml((p.preferred_equipment || []).join(", "))}" />
-              <input name="preferred_min_miles" type="number" placeholder="Preferred min miles" value="${p.preferred_min_miles || ""}" />
-              <input name="preferred_max_miles" type="number" placeholder="Preferred max miles" value="${p.preferred_max_miles || ""}" />
-              <input name="preferred_min_weight" type="number" placeholder="Preferred min weight" value="${p.preferred_min_weight || ""}" />
-            </div>
-            <div class="row" style="margin-top:12px">
-              <button class="btn primary" type="submit">Save Preferences</button>
-              <a class="btn ghost" href="/support">Help</a>
-            </div>
-          </form>
-        </div>
-
-        <div class="card">
-          <h3 style="margin-top:0">Your Requests</h3>
-          <div class="hr"></div>
-          ${myReqs.rows.length ? myReqs.rows.map(r => `
-            <div style="margin-top:10px; padding:12px; border:1px solid rgba(255,255,255,.08); border-radius:14px; background:rgba(6,8,9,.55)">
-              <div class="row" style="justify-content:space-between">
-                <div><b>Load #${r.load_id}</b> ${escapeHtml(r.lane_from)} → ${escapeHtml(r.lane_to)}</div>
-                <span class="badge ${r.status === "REQUESTED" ? "warn" : r.status === "ACCEPTED" ? "ok" : ""}">${escapeHtml(r.status)}</span>
-              </div>
-              <div class="muted">Load status: ${escapeHtml(r.load_status)}</div>
-            </div>
-          `).join("") : `<div class="muted">No requests yet.</div>`}
-        </div>
-      </div>
-    `;
-    return res.send(layout({ title: "Carrier", user, body }));
-  }
-
-  // ADMIN
-  const pending = await pool.query(`
-    SELECT cc.*, u.email
-    FROM carriers_compliance cc
-    JOIN users u ON u.id = cc.carrier_id
-    WHERE cc.status='PENDING'
-    ORDER BY cc.updated_at DESC
-  `);
-
-  const body = `
-    <div class="card">
-      <h2 style="margin-top:0">Admin — Compliance Approvals</h2>
-      <div class="muted">Approve carriers to enable Direct Booking + Verified badge.</div>
-      <div class="hr"></div>
-      ${pending.rows.length ? pending.rows.map(p => `
-        <div style="margin-top:10px; padding:12px; border:1px solid rgba(255,255,255,.08); border-radius:14px; background:rgba(6,8,9,.55)">
-          <div class="row" style="justify-content:space-between">
-            <div><b>${escapeHtml(p.email)}</b> • Insurance exp: ${escapeHtml(p.insurance_expires || "—")}</div>
-            <span class="badge warn">PENDING</span>
-          </div>
-          <div class="muted">Files: ${escapeHtml(p.insurance_filename||"—")}, ${escapeHtml(p.authority_filename||"—")}, ${escapeHtml(p.w9_filename||"—")}</div>
-          <div class="row" style="margin-top:10px">
-            <form method="POST" action="/admin/carriers/${p.carrier_id}/approve"><button class="btn primary" type="submit">Approve</button></form>
-            <form method="POST" action="/admin/carriers/${p.carrier_id}/reject"><button class="btn ghost" type="submit">Reject</button></form>
-          </div>
-        </div>
-      `).join("") : `<div class="muted">No pending carriers.</div>`}
-    </div>
-  `;
-  return res.send(layout({ title: "Admin", user, body }));
-});
-
-function shipperLoadRow(l) {
-  const status = qStr(l.status || "OPEN");
-  return `
-    <div style="margin-top:10px; padding:12px; border:1px solid rgba(255,255,255,.08); border-radius:14px; background:rgba(6,8,9,.55)">
-      <div class="row" style="justify-content:space-between">
-        <div><b>#${l.id}</b> ${escapeHtml(l.lane_from)} → ${escapeHtml(l.lane_to)}</div>
-        <span class="badge ${status==="BOOKED"?"ok":status==="REQUESTED"?"warn":"brand"}">${escapeHtml(status)}</span>
-      </div>
-      <div class="muted">${escapeHtml(l.pickup_date)} → ${escapeHtml(l.delivery_date)} • ${escapeHtml(l.equipment)} • ${int(l.miles).toLocaleString()} mi • ${money(l.rate_all_in)} all-in</div>
-    </div>
-  `;
-}
-
-/* ---------------- Carrier preferences ---------------- */
-app.post("/carrier/preferences", requireAuth, requireRole("CARRIER"), async (req, res) => {
-  const home_base = qStr(req.body.home_base);
-  const preferred_equipment = qArr(req.body.preferred_equipment);
-  const preferred_min_miles = int(req.body.preferred_min_miles);
-  const preferred_max_miles = int(req.body.preferred_max_miles);
-  const preferred_min_weight = int(req.body.preferred_min_weight);
-
-  await pool.query(`
-    INSERT INTO carrier_preferences (carrier_id, home_base, preferred_equipment, preferred_min_miles, preferred_max_miles, preferred_min_weight, updated_at)
-    VALUES ($1,$2,$3,$4,$5,$6,NOW())
-    ON CONFLICT (carrier_id) DO UPDATE SET
-      home_base=EXCLUDED.home_base,
-      preferred_equipment=EXCLUDED.preferred_equipment,
-      preferred_min_miles=EXCLUDED.preferred_min_miles,
-      preferred_max_miles=EXCLUDED.preferred_max_miles,
-      preferred_min_weight=EXCLUDED.preferred_min_weight,
-      updated_at=NOW()
-  `, [req.user.id, home_base, preferred_equipment, preferred_min_miles, preferred_max_miles, preferred_min_weight]);
-
-  res.redirect("/dashboard");
 });
 
 /* ---------------- Shipper actions ---------------- */
@@ -1521,35 +1408,34 @@ app.post("/shipper/loads", requireAuth, requireRole("SHIPPER"), async (req, res)
   const gate = postingAllowed(billing);
   if (!gate.ok) return res.status(403).send(`Posting blocked: ${gate.reason}`);
 
-  const lane_from = qStr(req.body.lane_from);
-  const lane_to = qStr(req.body.lane_to);
-  const pickup_date = qStr(req.body.pickup_date);
-  const delivery_date = qStr(req.body.delivery_date);
-  const equipment = qStr(req.body.equipment);
-  const commodity = qStr(req.body.commodity);
+  const lane_from = String(req.body.lane_from || "").trim();
+  const lane_to = String(req.body.lane_to || "").trim();
+  const pickup_date = String(req.body.pickup_date || "").trim();
+  const delivery_date = String(req.body.delivery_date || "").trim();
+  const equipment = String(req.body.equipment || "").trim();
+  const commodity = String(req.body.commodity || "").trim();
 
   const weight_lbs = int(req.body.weight_lbs);
   const miles = int(req.body.miles);
 
   const rate_all_in = Number(req.body.rate_all_in);
-  const payment_terms = qStr(req.body.payment_terms || "NET 30");
-  const quickpay_available = qStr(req.body.quickpay_available || "false") === "true";
+  const payment_terms = String(req.body.payment_terms || "NET 30").trim();
+  const quickpay_available = String(req.body.quickpay_available || "false") === "true";
 
   const detention_rate_per_hr = Number(req.body.detention_rate_per_hr);
   const detention_after_hours = int(req.body.detention_after_hours);
 
-  const appointment_type = qStr(req.body.appointment_type || "FCFS");
-  const accessorials = qStr(req.body.accessorials || "None");
-  const special_requirements = qStr(req.body.special_requirements || "None");
+  const appointment_type = String(req.body.appointment_type || "FCFS").trim();
+  const accessorials = String(req.body.accessorials || "None").trim();
+  const special_requirements = String(req.body.special_requirements || "None").trim();
 
-  const ins = await pool.query(
+  await pool.query(
     `INSERT INTO loads
      (shipper_id,lane_from,lane_to,pickup_date,delivery_date,equipment,weight_lbs,commodity,miles,
       rate_all_in,payment_terms,quickpay_available,detention_rate_per_hr,detention_after_hours,
       appointment_type,accessorials,special_requirements,status)
      VALUES
-     ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'OPEN')
-     RETURNING *`,
+     ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'OPEN')`,
     [
       req.user.id, lane_from, lane_to, pickup_date, delivery_date, equipment, weight_lbs, commodity, miles,
       rate_all_in, payment_terms, quickpay_available, detention_rate_per_hr, detention_after_hours,
@@ -1561,38 +1447,13 @@ app.post("/shipper/loads", requireAuth, requireRole("SHIPPER"), async (req, res)
     await pool.query(`UPDATE shippers_billing SET loads_used = loads_used + 1, updated_at=NOW() WHERE shipper_id=$1`, [req.user.id]);
   }
 
-  await notifySavedSearchesAboutLoad(ins.rows[0]);
-
   res.redirect("/dashboard");
-});
-
-/* ---------------- Booking actions ---------------- */
-app.post("/carrier/loads/:id/request", requireAuth, requireRole("CARRIER"), async (req, res) => {
-  const loadId = Number(req.params.id);
-
-  const comp = await pool.query(`SELECT status FROM carriers_compliance WHERE carrier_id=$1`, [req.user.id]);
-  const compStatus = comp.rows[0]?.status || "PENDING";
-  if (compStatus !== "APPROVED") return res.status(403).send("Compliance approval required before requesting loads.");
-
-  const load = await pool.query(`SELECT status FROM loads WHERE id=$1`, [loadId]);
-  if (!load.rows[0]) return res.sendStatus(404);
-  if (load.rows[0].status === "BOOKED") return res.status(400).send("Load already booked.");
-
-  await pool.query(
-    `INSERT INTO load_requests (load_id, carrier_id, status) VALUES ($1,$2,'REQUESTED')
-     ON CONFLICT (load_id, carrier_id) DO NOTHING`,
-    [loadId, req.user.id]
-  );
-
-  await pool.query(`UPDATE loads SET status='REQUESTED' WHERE id=$1 AND status='OPEN'`, [loadId]);
-
-  res.redirect("/loads");
 });
 
 app.post("/shipper/requests/:id/accept", requireAuth, requireRole("SHIPPER"), async (req, res) => {
   const requestId = Number(req.params.id);
   const r = await pool.query(`
-    SELECT lr.*, l.shipper_id, l.status as load_status, l.lane_from, l.lane_to, l.id as load_id
+    SELECT lr.*, l.shipper_id, l.status as load_status, l.lane_from, l.lane_to
     FROM load_requests lr
     JOIN loads l ON l.id = lr.load_id
     WHERE lr.id=$1
@@ -1607,10 +1468,9 @@ app.post("/shipper/requests/:id/accept", requireAuth, requireRole("SHIPPER"), as
   await pool.query(`UPDATE loads SET status='BOOKED', booked_carrier_id=$1 WHERE id=$2`, [row.carrier_id, row.load_id]);
 
   const carrierEmail = (await pool.query(`SELECT email FROM users WHERE id=$1`, [row.carrier_id])).rows[0]?.email;
-  const shipperEmail = req.user.email;
 
   await sendEmail(
-    shipperEmail,
+    req.user.email,
     `DFX Booking Confirmed • Load #${row.load_id}`,
     `<p><b>Booking confirmed.</b></p><p>Load #${row.load_id}: ${escapeHtml(row.lane_from)} → ${escapeHtml(row.lane_to)}</p><p>Status: BOOKED</p>`
   );
@@ -1652,116 +1512,160 @@ app.post("/shipper/requests/:id/decline", requireAuth, requireRole("SHIPPER"), a
   res.redirect("/dashboard");
 });
 
-/* ---------------- Rate Confirmation (auto-fill after booking) ---------------- */
-app.get("/shipper/loads/:id/ratecon", requireAuth, requireRole("SHIPPER"), async (req, res) => {
+/* ---------------- Rate Confirmation (auto-filled contract template) ---------------- */
+app.get("/shipper/loads/:id/rate-confirmation", requireAuth, requireRole("SHIPPER"), async (req, res) => {
+  const user = req.user;
   const loadId = Number(req.params.id);
 
-  const lq = await pool.query(`SELECT * FROM loads WHERE id=$1`, [loadId]);
-  const l = lq.rows[0];
-  if (!l || l.shipper_id !== req.user.id) return res.sendStatus(404);
-  if (String(l.status) !== "BOOKED") return res.status(400).send("Rate confirmation is available after booking.");
-
-  const carrierEmail = l.booked_carrier_id
-    ? (await pool.query(`SELECT email FROM users WHERE id=$1`, [l.booked_carrier_id])).rows[0]?.email
-    : "";
-
-  const body = `
-    <div class="card">
-      <div class="row" style="justify-content:space-between">
-        <div>
-          <h2 style="margin:0">Rate Confirmation</h2>
-          <div class="muted">Auto-filled after booking. Customize as needed.</div>
-        </div>
-        <span class="badge ok">Load #${l.id}</span>
-      </div>
-      <div class="hr"></div>
-
-      <div class="muted" style="line-height:1.55">
-        <p><b>Shipper:</b> ${escapeHtml(req.user.email)}</p>
-        <p><b>Carrier:</b> ${escapeHtml(carrierEmail || "—")}</p>
-
-        <p><b>Lane:</b> ${escapeHtml(l.lane_from)} → ${escapeHtml(l.lane_to)}</p>
-        <p><b>Pickup:</b> ${escapeHtml(l.pickup_date)} • <b>Delivery:</b> ${escapeHtml(l.delivery_date)}</p>
-
-        <p><b>Equipment:</b> ${escapeHtml(l.equipment)} • <b>Weight:</b> ${int(l.weight_lbs).toLocaleString()} lbs • <b>Miles:</b> ${int(l.miles).toLocaleString()}</p>
-
-        <p><b>All-In Rate:</b> ${money(l.rate_all_in)} • <b>Payment Terms:</b> ${escapeHtml(l.payment_terms)}${l.quickpay_available ? " (QuickPay available)" : ""}</p>
-
-        <p><b>Detention:</b> ${money(l.detention_rate_per_hr)}/hr after ${escapeHtml(l.detention_after_hours)} hours</p>
-        <p><b>Accessorials:</b> ${escapeHtml(l.accessorials)}</p>
-        <p><b>Notes:</b> ${escapeHtml(l.special_requirements)}</p>
-
-        <div class="hr"></div>
-        <p><b>Signatures</b></p>
-        <p>Shipper Authorized Signature: _______________________ Date: __________</p>
-        <p>Carrier Authorized Signature: _______________________ Date: __________</p>
-
-        <div class="hr"></div>
-        <div class="muted">Disclaimer: ${escapeHtml(DISCLAIMER_TEXT)}</div>
-      </div>
-    </div>
-  `;
-
-  res.send(layout({ title: "Rate Confirmation", user: req.user, body }));
-});
-
-/* ---------------- Templates ---------------- */
-app.get("/shipper/templates/:type", requireAuth, requireRole("SHIPPER"), async (req, res) => {
-  const type = qStr(req.params.type);
-  const user = req.user;
-
-  let title = "Template";
-  let content = "";
-
-  if (type === "rate-confirmation") {
-    title = "Rate Confirmation Template";
-    content = `
-      <p><b>Parties:</b> Shipper: [Shipper Legal Name] • Carrier: [Carrier Legal Name]</p>
-      <p><b>Load:</b> Origin → Destination • Pickup/Delivery • Equipment • Weight • Miles</p>
-      <p><b>Rate:</b> All-in rate $____ • Payment terms ____</p>
-      <p><b>Detention:</b> $____/hr after ____ hours</p>
-      <p><b>Accessorials:</b> ____</p>
-      <p><b>Notes:</b> ____</p>
-      <p><b>Signatures</b></p>
-      <p>Shipper: __________________ Date: ____</p>
-      <p>Carrier: __________________ Date: ____</p>
-    `;
-  } else if (type === "carrier-setup") {
-    title = "Carrier Setup Packet (Checklist)";
-    content = `
-      <ul>
-        <li>W-9</li>
-        <li>Certificate of Insurance (Auto Liability + Cargo)</li>
-        <li>Operating Authority (MC / DOT proof)</li>
-        <li>Signed rate confirmations</li>
-        <li>Payment terms agreement</li>
-      </ul>
-    `;
-  } else if (type === "terms") {
-    title = "Standard Load Terms (Starting Point)";
-    content = `
-      <ul>
-        <li>Payment Terms: NET 30 unless otherwise stated</li>
-        <li>Detention: after 2 hours, billed hourly</li>
-        <li>Accessorials: must be pre-approved</li>
-        <li>Carrier compliance required</li>
-      </ul>
-    `;
-  } else {
-    return res.sendStatus(404);
+  const r = await pool.query(
+    `SELECT l.*, s.email as shipper_email, c.email as carrier_email
+     FROM loads l
+     JOIN users s ON s.id = l.shipper_id
+     LEFT JOIN users c ON c.id = l.booked_carrier_id
+     WHERE l.id=$1 AND l.shipper_id=$2`,
+    [loadId, user.id]
+  );
+  const l = r.rows[0];
+  if (!l) return res.sendStatus(404);
+  if (String(l.status) !== "BOOKED" || !l.carrier_email) {
+    return res.status(400).send("Rate confirmation is available only after a load is BOOKED.");
   }
 
-  const body = `
-    <div class="card">
-      <h2 style="margin-top:0">${escapeHtml(title)}</h2>
-      <div class="muted">Starting point only — review with counsel for production use.</div>
+  const rc = rateConfirmationHtml(l);
+
+  res.send(layout({
+    title: `Rate Confirmation #${l.id}`,
+    user,
+    body: `
+      <div class="card">
+        <div class="row" style="justify-content:space-between">
+          <div>
+            <h2 style="margin:0">Rate Confirmation</h2>
+            <div class="muted">Load #${l.id} • ${escapeHtml(l.lane_from)} → ${escapeHtml(l.lane_to)}</div>
+          </div>
+          <a class="btn ghost" href="/dashboard">Back</a>
+        </div>
+        <div class="hr"></div>
+        ${rc}
+      </div>
+    `
+  }));
+});
+
+function rateConfirmationHtml(l) {
+  const rpmVal = rpm(l.rate_all_in, l.miles);
+  // Realistic, clean template (no "consult counsel" language)
+  return `
+    <div class="muted" style="line-height:1.55">
+      <p><b>Shipper:</b> ${escapeHtml(l.shipper_email || "")}</p>
+      <p><b>Carrier:</b> ${escapeHtml(l.carrier_email || "")}</p>
       <div class="hr"></div>
-      <div class="muted" style="line-height:1.55">${content}</div>
+
+      <h3 style="margin:0 0 8px 0">Load Details</h3>
+      <div class="kv">
+        <div class="k">Origin</div><div>${escapeHtml(l.lane_from)}</div>
+        <div class="k">Destination</div><div>${escapeHtml(l.lane_to)}</div>
+        <div class="k">Pickup</div><div>${escapeHtml(l.pickup_date)}</div>
+        <div class="k">Delivery</div><div>${escapeHtml(l.delivery_date)}</div>
+        <div class="k">Equipment</div><div>${escapeHtml(l.equipment)}</div>
+        <div class="k">Commodity</div><div>${escapeHtml(l.commodity)}</div>
+        <div class="k">Weight</div><div>${int(l.weight_lbs).toLocaleString()} lbs</div>
+        <div class="k">Miles</div><div>${int(l.miles).toLocaleString()} mi</div>
+      </div>
+
       <div class="hr"></div>
-      <a class="btn primary" href="/dashboard">Back to Dashboard</a>
+
+      <h3 style="margin:0 0 8px 0">Rate & Payment</h3>
+      <div class="kv">
+        <div class="k">All-In Linehaul</div><div>${money(l.rate_all_in)} (${rpmVal ? `$${rpmVal.toFixed(2)}/mi` : ""})</div>
+        <div class="k">Payment Terms</div><div>${escapeHtml(l.payment_terms)}${l.quickpay_available ? " • QuickPay Available" : ""}</div>
+        <div class="k">Detention</div><div>${money(l.detention_rate_per_hr)}/hr after ${escapeHtml(l.detention_after_hours)} hours</div>
+        <div class="k">Accessorials</div><div>${escapeHtml(l.accessorials)}</div>
+        <div class="k">Appointment</div><div>${escapeHtml(l.appointment_type)}</div>
+        <div class="k">Special Requirements</div><div>${escapeHtml(l.special_requirements)}</div>
+      </div>
+
+      <div class="hr"></div>
+
+      <h3 style="margin:0 0 8px 0">Standard Load Terms</h3>
+      <ul>
+        <li>Carrier agrees to transport the shipment described above from origin to destination.</li>
+        <li>Carrier represents it holds active operating authority and insurance required to perform transportation services in the United States.</li>
+        <li>Carrier will provide proof of pickup and delivery (POD) and any required documents for invoicing.</li>
+        <li>Accessorials and detention must be documented and approved per the load details above.</li>
+        <li>Any disputes regarding payment terms or accessorials will be handled directly between shipper and carrier.</li>
+      </ul>
+
+      <div class="hr"></div>
+      <div class="row">
+        <div class="load" style="flex:1">
+          <div style="font-weight:1000">Shipper Authorized Signature</div>
+          <div class="muted">Name/Title:</div>
+          <div class="muted">Date:</div>
+        </div>
+        <div class="load" style="flex:1">
+          <div style="font-weight:1000">Carrier Authorized Signature</div>
+          <div class="muted">Name/Title:</div>
+          <div class="muted">Date:</div>
+        </div>
+      </div>
     </div>
   `;
-  res.send(layout({ title, user, body }));
+}
+
+/* ---------------- Carrier actions ---------------- */
+app.post(
+  "/carrier/compliance",
+  requireAuth,
+  requireRole("CARRIER"),
+  upload.fields([{ name: "insurance", maxCount: 1 }, { name: "authority", maxCount: 1 }, { name: "w9", maxCount: 1 }]),
+  async (req, res) => {
+    const files = req.files || {};
+    const insurance = files.insurance?.[0];
+    const authority = files.authority?.[0];
+    const w9 = files.w9?.[0];
+    const insurance_expires = String(req.body.insurance_expires || "").trim();
+
+    if (!insurance || !authority || !w9) return res.status(400).send("All 3 documents are required.");
+    if (!insurance_expires) return res.status(400).send("Insurance expiration is required.");
+
+    await pool.query(
+      `INSERT INTO carriers_compliance (carrier_id, insurance_filename, authority_filename, w9_filename, insurance_expires, status, updated_at)
+       VALUES ($1,$2,$3,$4,$5,'PENDING',NOW())
+       ON CONFLICT (carrier_id) DO UPDATE
+         SET insurance_filename=EXCLUDED.insurance_filename,
+             authority_filename=EXCLUDED.authority_filename,
+             w9_filename=EXCLUDED.w9_filename,
+             insurance_expires=EXCLUDED.insurance_expires,
+             status='PENDING',
+             updated_at=NOW()`,
+      [req.user.id, insurance.originalname, authority.originalname, w9.originalname, insurance_expires]
+    );
+
+    res.redirect("/dashboard");
+  }
+);
+
+app.post("/carrier/loads/:id/request", requireAuth, requireRole("CARRIER"), async (req, res) => {
+  const loadId = Number(req.params.id);
+
+  const comp = await pool.query(`SELECT status FROM carriers_compliance WHERE carrier_id=$1`, [req.user.id]);
+  const compStatus = comp.rows[0]?.status || "PENDING";
+  if (compStatus !== "APPROVED") return res.status(403).send("Verification required before requesting loads.");
+
+  const load = await pool.query(`SELECT status FROM loads WHERE id=$1`, [loadId]);
+  if (!load.rows[0]) return res.sendStatus(404);
+  if (load.rows[0].status === "BOOKED") return res.status(400).send("Load already booked.");
+
+  await pool.query(
+    `INSERT INTO load_requests (load_id, carrier_id, status) VALUES ($1,$2,'REQUESTED')
+     ON CONFLICT (load_id, carrier_id) DO NOTHING`,
+    [loadId, req.user.id]
+  );
+
+  await pool.query(`UPDATE loads SET status='REQUESTED' WHERE id=$1 AND status='OPEN'`, [loadId]);
+
+  res.redirect("/loads");
 });
 
 /* ---------------- Admin compliance ---------------- */
@@ -1776,311 +1680,199 @@ app.post("/admin/carriers/:id/reject", requireAuth, requireRole("ADMIN"), async 
   res.redirect("/dashboard");
 });
 
-/* ---------------- Load Board (show ALL loads; no LIMIT) ---------------- */
+/* ---------------- Load board (newest default; option sort=rpm; show ALL loads) ---------------- */
 app.get("/loads", async (req, res) => {
   const user = getUser(req);
 
+  // Carrier badge
   let carrierBadge = null;
   if (user?.role === "CARRIER") {
     const comp = await pool.query(`SELECT status FROM carriers_compliance WHERE carrier_id=$1`, [user.id]);
     carrierBadge = comp.rows[0]?.status || "PENDING";
   }
 
-  // Filters
-  const equips = qArr(req.query.equip);
-  const minMiles = qNum(req.query.minMiles);
-  const maxMiles = qNum(req.query.maxMiles);
-  const minWeight = qNum(req.query.minWeight);
-  const maxWeight = qNum(req.query.maxWeight);
+  // Filters / sorting
+  const sort = String(req.query.sort || "newest").toLowerCase(); // newest | rpm
+  const equipment = String(req.query.equipment || "").trim();
+  const minMiles = req.query.minMiles !== undefined ? int(req.query.minMiles) : null;
+  const maxMiles = req.query.maxMiles !== undefined ? int(req.query.maxMiles) : null;
+  const minWeight = req.query.minWeight !== undefined ? int(req.query.minWeight) : null;
+  const maxWeight = req.query.maxWeight !== undefined ? int(req.query.maxWeight) : null;
 
-  const origin = qStr(req.query.origin);
-  const dest = qStr(req.query.dest);
+  // Default view: only actionable loads (OPEN + REQUESTED)
+  const statusView = String(req.query.status || "actionable").toLowerCase(); // actionable | all | booked
+  const statuses =
+    statusView === "all" ? ["OPEN", "REQUESTED", "BOOKED"] :
+    statusView === "booked" ? ["BOOKED"] :
+    ["OPEN", "REQUESTED"];
 
-  const pickupFrom = qStr(req.query.pickupFrom);
-  const pickupTo = qStr(req.query.pickupTo);
-
-  const onlyOpen = qStr(req.query.onlyOpen || "1") === "1"; // default ON
-
-  // Sorting: default newest (per request), with option rpm
-  const sort = qStr(req.query.sort || "newest");
-  const sortSql =
-    sort === "rate" ? `l.rate_all_in DESC NULLS LAST` :
-    sort === "rpm"  ? `(l.rate_all_in::numeric / NULLIF(l.miles,0)) DESC NULLS LAST` :
-    sort === "miles"? `l.miles ASC NULLS LAST` :
-    sort === "pickup"? `l.pickup_date ASC NULLS LAST` :
-    `l.created_at DESC`;
-
-  // Safe SQL builder
+  // Build safe SQL
   const where = [];
   const params = [];
-  const add = (clause, value) => { params.push(value); where.push(clause.replace("?", `$${params.length}`)); };
+  let p = 1;
 
-  if (onlyOpen) where.push(`l.status IN ('OPEN','REQUESTED')`);
-  if (equips.length) add(`l.equipment = ANY(?)`, equips);
+  where.push(`status = ANY($${p++})`);
+  params.push(statuses);
 
-  if (minMiles != null) add(`l.miles >= ?`, minMiles);
-  if (maxMiles != null) add(`l.miles <= ?`, maxMiles);
+  if (equipment) {
+    where.push(`equipment = $${p++}`);
+    params.push(equipment);
+  }
+  if (minMiles !== null && minMiles > 0) {
+    where.push(`miles >= $${p++}`);
+    params.push(minMiles);
+  }
+  if (maxMiles !== null && maxMiles > 0) {
+    where.push(`miles <= $${p++}`);
+    params.push(maxMiles);
+  }
+  if (minWeight !== null && minWeight > 0) {
+    where.push(`weight_lbs >= $${p++}`);
+    params.push(minWeight);
+  }
+  if (maxWeight !== null && maxWeight > 0) {
+    where.push(`weight_lbs <= $${p++}`);
+    params.push(maxWeight);
+  }
 
-  if (minWeight != null) add(`l.weight_lbs >= ?`, minWeight);
-  if (maxWeight != null) add(`l.weight_lbs <= ?`, maxWeight);
+  const orderBy =
+    sort === "rpm"
+      ? `ORDER BY (rate_all_in / NULLIF(miles,0)) DESC NULLS LAST, created_at DESC`
+      : `ORDER BY created_at DESC`;
 
-  if (origin) add(`l.lane_from ILIKE ?`, `%${origin}%`);
-  if (dest) add(`l.lane_to ILIKE ?`, `%${dest}%`);
-
-  if (pickupFrom) add(`l.pickup_date >= ?`, pickupFrom);
-  if (pickupTo) add(`l.pickup_date <= ?`, pickupTo);
-
-  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
-
-  // NOTE: No LIMIT — shows every load posted
-  const sql = `
-    SELECT
-      l.*,
-      (l.rate_all_in::numeric / NULLIF(l.miles,0)) AS rpm
-    FROM loads l
-    ${whereSql}
-    ORDER BY ${sortSql}
-  `;
-
+  const sql = `SELECT * FROM loads ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ${orderBy}`;
   const r = await pool.query(sql, params);
 
-  // Equipment options (includes Standard Van)
-  const equipOptions = ["Dry Van", "Standard Van", "Reefer", "Flatbed", "Stepdeck", "Power Only"];
-  const equipChips = equipOptions.map((e) => {
-    const checked = equips.includes(e) ? "checked" : "";
-    return `
-      <label class="badge" style="cursor:pointer">
-        <input type="checkbox" name="equip" value="${escapeHtml(e)}" ${checked} style="margin-right:8px; transform: translateY(1px);" />
-        ${escapeHtml(e)}
-      </label>
-    `;
-  }).join("");
-
-  const filterPanel = `
+  const body = `
     <div class="card">
       <div class="row" style="justify-content:space-between">
         <div>
           <h2 style="margin:0">Load Board</h2>
-          <div class="muted">Filter by equipment, miles, weight, dates. Sort by RPM when you want.</div>
+          <div class="muted">Transparent loads shown by default: all-in rate, terms, detention, accessorials.</div>
         </div>
-        ${
-          user?.role === "CARRIER"
-            ? `<span class="badge ${carrierBadge === "APPROVED" ? "ok" : "warn"}">Carrier: ${escapeHtml(carrierBadge || "PENDING")}</span>`
-            : `<span class="badge brand">All-in pricing • Transparent terms</span>`
-        }
+        <div class="row">
+          ${user?.role === "CARRIER"
+            ? `<span class="badge ${carrierBadge === "APPROVED" ? "ok" : "warn"}">Carrier: ${escapeHtml(carrierBadge)}</span>`
+            : user?.role === "SHIPPER"
+              ? `<a class="btn green" href="/shipper/plans">Plans</a>`
+              : ``}
+        </div>
       </div>
 
       <div class="hr"></div>
 
       <form method="GET" action="/loads">
-        <div class="row" style="margin-bottom:10px; gap:8px; align-items:flex-start; flex-wrap:wrap">
-          ${equipChips}
-        </div>
-
-        <div class="filters" style="grid-template-columns: 1.2fr 1.2fr 1fr 1fr 1fr">
-          <input name="origin" placeholder="Origin contains (city/state)" value="${escapeHtml(origin)}" />
-          <input name="dest" placeholder="Destination contains (city/state)" value="${escapeHtml(dest)}" />
-          <input name="minMiles" type="number" placeholder="Min miles" value="${minMiles ?? ""}" />
-          <input name="maxMiles" type="number" placeholder="Max miles" value="${maxMiles ?? ""}" />
+        <div class="filters">
           <select name="sort">
             <option value="newest" ${sort==="newest"?"selected":""}>Sort: Newest</option>
-            <option value="rpm" ${sort==="rpm"?"selected":""}>Sort: Highest RPM</option>
-            <option value="rate" ${sort==="rate"?"selected":""}>Sort: Highest Rate</option>
-            <option value="miles" ${sort==="miles"?"selected":""}>Sort: Shortest Miles</option>
-            <option value="pickup" ${sort==="pickup"?"selected":""}>Sort: Pickup Soonest</option>
+            <option value="rpm" ${sort==="rpm"?"selected":""}>Sort: RPM</option>
           </select>
-
-          <input name="minWeight" type="number" placeholder="Min weight (lbs)" value="${minWeight ?? ""}" />
-          <input name="maxWeight" type="number" placeholder="Max weight (lbs)" value="${maxWeight ?? ""}" />
-          <input name="pickupFrom" placeholder="Pickup from (YYYY-MM-DD)" value="${escapeHtml(pickupFrom)}" />
-          <input name="pickupTo" placeholder="Pickup to (YYYY-MM-DD)" value="${escapeHtml(pickupTo)}" />
-          <select name="onlyOpen">
-            <option value="1" ${onlyOpen ? "selected":""}>Only Open/Requested</option>
-            <option value="0" ${!onlyOpen ? "selected":""}>Include Booked</option>
+          <select name="status">
+            <option value="actionable" ${statusView==="actionable"?"selected":""}>Status: Open/Requested</option>
+            <option value="all" ${statusView==="all"?"selected":""}>Status: All</option>
+            <option value="booked" ${statusView==="booked"?"selected":""}>Status: Booked</option>
           </select>
+          <select name="equipment">
+            <option value="">Equipment: Any</option>
+            ${equipmentOptionsHtml(equipment)}
+          </select>
+          <input name="minMiles" placeholder="Min miles" value="${escapeHtml(req.query.minMiles || "")}" />
+          <input name="maxMiles" placeholder="Max miles" value="${escapeHtml(req.query.maxMiles || "")}" />
         </div>
 
-        <div class="row" style="margin-top:12px">
-          <button class="btn primary" type="submit">Apply Filters</button>
-          <a class="btn ghost" href="/loads">Reset</a>
-          ${user?.role === "CARRIER" ? `<a class="btn ghost" href="/carrier/searches">Saved Searches</a>` : ``}
-        </div>
-      </form>
-    </div>
-  `;
-
-  const rows = r.rows.map((l) => {
-    const status = qStr(l.status || "OPEN");
-    const rpm = Number(l.rpm);
-    const rpmText = Number.isFinite(rpm) ? `$${rpm.toFixed(2)}` : "—";
-
-    const action =
-      user?.role === "CARRIER"
-        ? (status === "BOOKED"
-            ? `<span class="badge ok">Booked</span>`
-            : (carrierBadge === "APPROVED"
-                ? `<form method="POST" action="/carrier/loads/${l.id}/request">
-                     <button class="btn primary" type="submit">Request</button>
-                   </form>`
-                : `<span class="badge warn">Upload docs + get approved</span>`
-              )
-          )
-        : "";
-
-    return `
-      <tr>
-        <td style="padding:12px 10px; border-top:1px solid rgba(255,255,255,.08)">
-          <div style="font-weight:1000">${escapeHtml(l.lane_from)} → ${escapeHtml(l.lane_to)}</div>
-          <div class="muted" style="font-size:12px">
-            Pickup: ${escapeHtml(l.pickup_date)} • Delivery: ${escapeHtml(l.delivery_date)} • ${escapeHtml(l.appointment_type)}
-          </div>
-        </td>
-        <td style="padding:12px 10px; border-top:1px solid rgba(255,255,255,.08)">${escapeHtml(l.equipment)}</td>
-        <td style="padding:12px 10px; border-top:1px solid rgba(255,255,255,.08)">${int(l.weight_lbs).toLocaleString()}</td>
-        <td style="padding:12px 10px; border-top:1px solid rgba(255,255,255,.08)">${int(l.miles).toLocaleString()}</td>
-        <td style="padding:12px 10px; border-top:1px solid rgba(255,255,255,.08)">
-          <div style="font-weight:1000">${money(l.rate_all_in)}</div>
-          <div class="muted" style="font-size:12px">RPM: ${escapeHtml(rpmText)}</div>
-        </td>
-        <td style="padding:12px 10px; border-top:1px solid rgba(255,255,255,.08)">
-          <span class="badge ${status==="BOOKED"?"ok":status==="REQUESTED"?"warn":"brand"}">${escapeHtml(status)}</span>
-        </td>
-        <td style="padding:12px 10px; border-top:1px solid rgba(255,255,255,.08)">
-          <div class="muted" style="font-size:12px">${escapeHtml(l.payment_terms)}${l.quickpay_available ? " • QuickPay" : ""}</div>
-          <div class="muted" style="font-size:12px">Det: ${money(l.detention_rate_per_hr)}/hr after ${escapeHtml(l.detention_after_hours)}h</div>
-        </td>
-        <td style="padding:12px 10px; border-top:1px solid rgba(255,255,255,.08)">${action}</td>
-      </tr>
-    `;
-  }).join("");
-
-  const table = `
-    <div class="card">
-      <div class="row" style="justify-content:space-between">
-        <div class="muted">Showing ${r.rows.length} loads</div>
-        <span class="badge brand">All-in pricing • Transparent terms</span>
-      </div>
-      <div class="hr"></div>
-
-      <div style="overflow:auto;">
-        <table style="width:100%; border-collapse:collapse; min-width: 980px">
-          <thead>
-            <tr>
-              <th style="text-align:left; padding:10px; color:rgba(238,247,241,.78)">Lane</th>
-              <th style="text-align:left; padding:10px; color:rgba(238,247,241,.78)">Equip</th>
-              <th style="text-align:left; padding:10px; color:rgba(238,247,241,.78)">Weight</th>
-              <th style="text-align:left; padding:10px; color:rgba(238,247,241,.78)">Miles</th>
-              <th style="text-align:left; padding:10px; color:rgba(238,247,241,.78)">Rate</th>
-              <th style="text-align:left; padding:10px; color:rgba(238,247,241,.78)">Status</th>
-              <th style="text-align:left; padding:10px; color:rgba(238,247,241,.78)">Terms</th>
-              <th style="text-align:left; padding:10px; color:rgba(238,247,241,.78)">Action</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${rows || `<tr><td colspan="8" style="padding:16px" class="muted">No loads match these filters.</td></tr>`}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  `;
-
-  res.send(layout({ title: "Load Board", user, body: `${filterPanel}${table}` }));
-});
-
-/* ---------------- Saved searches ---------------- */
-app.get("/carrier/searches", requireAuth, requireRole("CARRIER"), async (req, res) => {
-  const user = req.user;
-  const searches = await pool.query(`SELECT * FROM carrier_saved_searches WHERE carrier_id=$1 ORDER BY created_at DESC`, [user.id]);
-
-  const body = `
-    <div class="card">
-      <h2 style="margin-top:0">Saved Searches & Alerts</h2>
-      <div class="muted">Save filters. If SMTP is configured, you can receive email alerts.</div>
-      <div class="hr"></div>
-
-      <form method="POST" action="/carrier/searches">
-        <div class="filters">
-          <input name="name" placeholder="Search name (e.g., Reefer TX→GA)" required />
-          <input name="equips" placeholder="Equipment (comma-separated)" />
-          <input name="origin" placeholder="Origin contains" />
-          <input name="dest" placeholder="Destination contains" />
-          <input name="min_miles" type="number" placeholder="Min miles" />
-          <input name="max_miles" type="number" placeholder="Max miles" />
-          <input name="min_weight" type="number" placeholder="Min weight" />
-          <input name="max_weight" type="number" placeholder="Max weight" />
-          <input name="pickup_from" placeholder="Pickup from YYYY-MM-DD" />
-          <input name="pickup_to" placeholder="Pickup to YYYY-MM-DD" />
-        </div>
-        <div class="row" style="margin-top:12px">
-          <button class="btn primary" type="submit">Save</button>
-          <a class="btn ghost" href="/loads">Back to Load Board</a>
+        <div class="filters" style="margin-top:10px; grid-template-columns:1fr 1fr 1fr 1fr 1fr">
+          <input name="minWeight" placeholder="Min weight (lbs)" value="${escapeHtml(req.query.minWeight || "")}" />
+          <input name="maxWeight" placeholder="Max weight (lbs)" value="${escapeHtml(req.query.maxWeight || "")}" />
+          <div></div><div></div>
+          <button class="btn green" type="submit">Apply</button>
         </div>
       </form>
 
       <div class="hr"></div>
 
-      ${searches.rows.length ? searches.rows.map(s => `
-        <div style="margin-top:10px; padding:12px; border:1px solid rgba(255,255,255,.08); border-radius:14px; background:rgba(6,8,9,.55)">
-          <div class="row" style="justify-content:space-between">
-            <div><b>${escapeHtml(s.name)}</b></div>
-            <form method="POST" action="/carrier/searches/${s.id}/delete">
-              <button class="btn ghost" type="submit">Delete</button>
-            </form>
-          </div>
-          <div class="muted" style="margin-top:6px">
-            Equip: ${(s.equips||[]).join(", ") || "Any"} • Origin: ${escapeHtml(s.origin||"Any")} • Dest: ${escapeHtml(s.dest||"Any")}
-          </div>
-        </div>
-      `).join("") : `<div class="muted">No saved searches yet.</div>`}
+      <div class="row">
+        <span class="badge brand">${r.rows.length.toLocaleString()} loads shown</span>
+        ${sort === "rpm" ? `<span class="badge">Sorted by RPM (rate ÷ miles)</span>` : `<span class="badge">Sorted by newest</span>`}
+      </div>
+
+      ${r.rows.length ? r.rows.map(l => loadCard(l, user, carrierBadge)).join("") : `<div class="muted">No loads posted yet.</div>`}
     </div>
   `;
-
-  res.send(layout({ title: "Saved Searches", user, body }));
+  res.send(layout({ title: "Loads", user, body }));
 });
 
-app.post("/carrier/searches", requireAuth, requireRole("CARRIER"), async (req, res) => {
-  const name = qStr(req.body.name);
-  const equips = qArr(req.body.equips);
-  const origin = qStr(req.body.origin);
-  const dest = qStr(req.body.dest);
-  const min_miles = req.body.min_miles ? int(req.body.min_miles) : null;
-  const max_miles = req.body.max_miles ? int(req.body.max_miles) : null;
-  const min_weight = req.body.min_weight ? int(req.body.min_weight) : null;
-  const max_weight = req.body.max_weight ? int(req.body.max_weight) : null;
-  const pickup_from = qStr(req.body.pickup_from);
-  const pickup_to = qStr(req.body.pickup_to);
+function loadCard(l, user, carrierBadge) {
+  const status = String(l.status || "OPEN");
+  const canRequest = user?.role === "CARRIER";
+  const rpmVal = rpm(l.rate_all_in, l.miles);
 
-  await pool.query(`
-    INSERT INTO carrier_saved_searches
-      (carrier_id, name, equips, origin, dest, min_miles, max_miles, min_weight, max_weight, pickup_from, pickup_to, only_open)
-    VALUES
-      ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true)
-  `, [req.user.id, name, equips, origin, dest, min_miles, max_miles, min_weight, max_weight, pickup_from, pickup_to]);
+  const shipperActions =
+    user?.role === "SHIPPER" && String(l.status) === "BOOKED"
+      ? `<a class="btn green" href="/shipper/loads/${l.id}/rate-confirmation">Rate Confirmation</a>`
+      : "";
 
-  res.redirect("/carrier/searches");
-});
+  return `
+    <div class="load">
+      <div class="loadTop">
+        <div>
+          <div class="lane">#${l.id} ${escapeHtml(l.lane_from)} → ${escapeHtml(l.lane_to)}</div>
+          <div class="muted">${escapeHtml(l.pickup_date)} → ${escapeHtml(l.delivery_date)} • ${escapeHtml(l.equipment)}</div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-weight:1000">${money(l.rate_all_in)} <span class="muted">(all-in)</span></div>
+          <div class="muted">${int(l.miles).toLocaleString()} mi • ${int(l.weight_lbs).toLocaleString()} lbs • ${rpmVal ? `$${rpmVal.toFixed(2)}/mi` : ""}</div>
+          <div style="margin-top:6px"><span class="badge ${status==="BOOKED"?"ok":status==="REQUESTED"?"warn":"brand"}">${escapeHtml(status)}</span></div>
+        </div>
+      </div>
 
-app.post("/carrier/searches/:id/delete", requireAuth, requireRole("CARRIER"), async (req, res) => {
-  const id = Number(req.params.id);
-  await pool.query(`DELETE FROM carrier_saved_searches WHERE id=$1 AND carrier_id=$2`, [id, req.user.id]);
-  res.redirect("/carrier/searches");
-});
+      <div class="row" style="margin-top:10px">
+        <span class="badge ok">Terms: ${escapeHtml(l.payment_terms)}${l.quickpay_available ? " • QuickPay" : ""}</span>
+        <span class="badge ok">Detention: ${money(l.detention_rate_per_hr)}/hr after ${escapeHtml(l.detention_after_hours)}h</span>
+        <span class="badge ok">Accessorials: ${escapeHtml(l.accessorials)}</span>
+        <span class="badge">Appt: ${escapeHtml(l.appointment_type)}</span>
+      </div>
+
+      <div class="kv">
+        <div class="k">Commodity</div><div>${escapeHtml(l.commodity)}</div>
+        <div class="k">Notes</div><div>${escapeHtml(l.special_requirements)}</div>
+      </div>
+
+      ${(canRequest || shipperActions) ? `
+        <div class="row" style="margin-top:12px">
+          ${shipperActions || ""}
+          ${canRequest ? (
+            status === "BOOKED"
+              ? `<span class="badge ok">Booked</span>`
+              : carrierBadge === "APPROVED"
+                ? `<form method="POST" action="/carrier/loads/${l.id}/request"><button class="btn green" type="submit">Request to Book</button></form>`
+                : `<span class="badge warn">Upload docs + get verified to request loads</span>`
+          ) : ``}
+        </div>
+      ` : ``}
+    </div>
+  `;
+}
+
+function equipmentOptionsHtml(selected) {
+  const opts = [
+    "Dry Van",
+    "Standard Van",
+    "Reefer",
+    "Flatbed",
+    "Stepdeck",
+    "Power Only",
+    "Dump Truck",
+    "Tanker",
+    "Oversized Load",
+    "Hazardous",
+  ];
+  return opts.map(o => `<option ${o===selected?"selected":""}>${escapeHtml(o)}</option>`).join("");
+}
 
 /* ---------------- Health ---------------- */
-app.get("/health", async (_, res) => {
-  try {
-    await pool.query("SELECT 1");
-    res.json({
-      ok: true,
-      stripeEnabled,
-      smtpEnabled: !!getMailer(),
-      s3Enabled,
-      db: "ok",
-    });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e.message || e) });
-  }
-});
+app.get("/health", (_, res) =>
+  res.json({ ok: true, stripeEnabled, smtpEnabled: !!getMailer() })
+);
 
 /* ---------------- Start ---------------- */
 initDb()
