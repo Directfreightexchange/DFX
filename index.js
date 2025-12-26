@@ -1,6 +1,16 @@
+"use strict";
+
 /* ============================================================
-   DFX — index.js (PART 1 of 2)
-   Paste PART 1 first, then paste PART 2 directly underneath.
+   Direct Freight Exchange (DFX) — single-file app
+   - Green/Black theme
+   - Roles: SHIPPER / CARRIER / ADMIN
+   - Carrier verification docs required (W-9, COI, Authority)
+   - Shipper subscription plans via Stripe (optional)
+   - Stripe invoices/receipts download (optional)
+   - Forgot password (email reset link via SMTP / SendGrid SMTP)
+   - Rate Confirmation auto-fill after booking
+   - Load board w/ equipment, miles, weight, RPM + sorting
+   - Safe SQL params everywhere
    ============================================================ */
 
 const express = require("express");
@@ -13,116 +23,52 @@ const Stripe = require("stripe");
 const nodemailer = require("nodemailer");
 const crypto = require("crypto");
 
-// Optional S3 (AWS SDK v3)
-let S3Client, PutObjectCommand, GetObjectCommand;
-try {
-  ({ S3Client, PutObjectCommand, GetObjectCommand } = require("@aws-sdk/client-s3"));
-} catch {
-  // ok if not installed
-}
-
 const app = express();
 
-// Stripe webhook must be RAW body on this route only
-app.post("/stripe/webhook", express.raw({ type: "application/json" }));
+/* ---------------- Stripe webhook needs RAW body only on this route ---------------- */
+app.post("/stripe/webhook", express.raw({ type: "application/json" }), (req, res, next) => next());
 
+/* ---------------- Standard middleware ---------------- */
+app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
-/* ---------------- ENV ---------------- */
+/* ---------------- Config ---------------- */
 const PORT = process.env.PORT || 3000;
+
 const DATABASE_URL = process.env.DATABASE_URL;
 const JWT_SECRET = process.env.JWT_SECRET;
+
 const APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;
 
-// Admin bootstrap (TEMPORARY) - set in Render env then delete after confirmed
-const BOOTSTRAP_ADMIN_EMAIL = String(process.env.BOOTSTRAP_ADMIN_EMAIL || "").trim().toLowerCase();
-
+// Stripe (optional)
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
 const STRIPE_PRICE_STARTER = process.env.STRIPE_PRICE_STARTER;
 const STRIPE_PRICE_GROWTH = process.env.STRIPE_PRICE_GROWTH;
 const STRIPE_PRICE_ENTERPRISE = process.env.STRIPE_PRICE_ENTERPRISE;
 
-// SMTP (SendGrid)
+// Email (SMTP / SendGrid SMTP)
 const SMTP_HOST = process.env.SMTP_HOST;
 const SMTP_PORT = Number(process.env.SMTP_PORT || "587");
 const SMTP_USER = process.env.SMTP_USER;
 const SMTP_PASS = process.env.SMTP_PASS;
 const SMTP_FROM = process.env.SMTP_FROM || "no-reply@directfreightexchange.com";
 
-// Support
-const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || "support@directfreightexchange.com";
-const SUPPORT_PHONE = process.env.SUPPORT_PHONE || "";
+// Admin bootstrap
+const BOOTSTRAP_ADMIN_EMAIL = (process.env.BOOTSTRAP_ADMIN_EMAIL || "").trim().toLowerCase();
 
-// S3 optional
-const AWS_REGION = process.env.AWS_REGION;
-const S3_BUCKET = process.env.S3_BUCKET;
-const S3_PUBLIC_BASE_URL = process.env.S3_PUBLIC_BASE_URL || "";
+// Optional “Help” link (if you later want to link to a chat provider)
+const HELP_CHAT_URL = (process.env.HELP_CHAT_URL || "").trim();
 
-/* ---------------- Boot fail ---------------- */
-function escapeHtml(s) {
-  return String(s ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
 function bootFail(msg) {
   app.get("*", (_, res) => res.status(500).send(`<h1>Config error</h1><p>${escapeHtml(msg)}</p>`));
-  app.listen(PORT, "0.0.0.0", () => console.log("BootFail listening on", PORT));
+  app.listen(PORT, "0.0.0.0");
 }
 
 if (!DATABASE_URL) return bootFail("Missing DATABASE_URL");
 if (!JWT_SECRET) return bootFail("Missing JWT_SECRET");
 
-/* ---------------- Helpers ---------------- */
-function qStr(v) {
-  return String(v ?? "").trim();
-}
-function int(n) {
-  const x = Number(n);
-  return Number.isFinite(x) ? Math.trunc(x) : 0;
-}
-function money(n) {
-  const x = Number(n);
-  return Number.isFinite(x) ? `$${x.toFixed(2)}` : "";
-}
-function rpm(rateAllIn, miles) {
-  const r = Number(rateAllIn);
-  const m = Number(miles);
-  if (!Number.isFinite(r) || !Number.isFinite(m) || m <= 0) return 0;
-  return r / m;
-}
-function monthKey(d = new Date()) {
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  return `${y}-${m}`;
-}
-function sha256Hex(s) {
-  return crypto.createHash("sha256").update(String(s)).digest("hex");
-}
-function randomToken() {
-  return crypto.randomBytes(32).toString("hex");
-}
-function safeFilename(name) {
-  const base = String(name || "file").replace(/[^a-zA-Z0-9._-]/g, "_");
-  return base.slice(0, 160) || "file";
-}
-
-/* ---------------- Postgres ---------------- */
-const pool = new Pool({
-  connectionString: DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-});
-
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
-});
-
-/* ---------------- Stripe ---------------- */
 const stripeEnabled = !!(
   STRIPE_SECRET_KEY &&
   STRIPE_WEBHOOK_SECRET &&
@@ -132,11 +78,31 @@ const stripeEnabled = !!(
 );
 const stripe = stripeEnabled ? new Stripe(STRIPE_SECRET_KEY) : null;
 
+/* ---------------- DB ---------------- */
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+});
+
+/* ---------------- Uploads ---------------- */
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+});
+
+/* ---------------- Plans ---------------- */
 const PLANS = {
   STARTER: { label: "Starter", price: 99, limit: 15 },
   GROWTH: { label: "Growth", price: 199, limit: 30 },
-  ENTERPRISE: { label: "Enterprise", price: 399, limit: -1 },
+  ENTERPRISE: { label: "Enterprise", price: 399, limit: -1 }, // unlimited
 };
+
+function priceIdForPlan(plan) {
+  if (plan === "STARTER") return STRIPE_PRICE_STARTER;
+  if (plan === "GROWTH") return STRIPE_PRICE_GROWTH;
+  if (plan === "ENTERPRISE") return STRIPE_PRICE_ENTERPRISE;
+  return null;
+}
 
 function planFromPriceId(priceId) {
   if (!priceId) return null;
@@ -145,88 +111,62 @@ function planFromPriceId(priceId) {
   if (priceId === STRIPE_PRICE_ENTERPRISE) return "ENTERPRISE";
   return null;
 }
-function priceIdForPlan(plan) {
-  if (plan === "STARTER") return STRIPE_PRICE_STARTER;
-  if (plan === "GROWTH") return STRIPE_PRICE_GROWTH;
-  if (plan === "ENTERPRISE") return STRIPE_PRICE_ENTERPRISE;
-  return null;
+
+function monthKey(d = new Date()) {
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  return `${y}-${m}`;
 }
 
-/* ---------------- S3 optional ---------------- */
-const s3Enabled = !!(
-  AWS_REGION &&
-  S3_BUCKET &&
-  process.env.AWS_ACCESS_KEY_ID &&
-  process.env.AWS_SECRET_ACCESS_KEY &&
-  S3Client &&
-  PutObjectCommand &&
-  GetObjectCommand
-);
-const s3 = s3Enabled ? new S3Client({ region: AWS_REGION }) : null;
-
-function publicUrlForKey(key) {
-  if (!S3_PUBLIC_BASE_URL) return "";
-  const base = S3_PUBLIC_BASE_URL.replace(/\/+$/, "");
-  return `${base}/${key}`;
-}
-function s3KeyForCarrierDoc(carrierId, docType, originalName) {
-  const safe = safeFilename(originalName);
-  const id = crypto.randomUUID();
-  const yyyy = new Date().getUTCFullYear();
-  return `carriers/${carrierId}/${yyyy}/${docType}/${id}_${safe}`;
-}
-async function uploadBufferToS3({ key, buffer, contentType }) {
-  if (!s3Enabled) throw new Error("S3 not configured");
-  await s3.send(
-    new PutObjectCommand({
-      Bucket: S3_BUCKET,
-      Key: key,
-      Body: buffer,
-      ContentType: contentType || "application/octet-stream",
-      ACL: "private",
-    })
-  );
-  return { key, url: publicUrlForKey(key) };
-}
-async function streamS3ObjectToRes(key, res) {
-  const out = await s3.send(new GetObjectCommand({ Bucket: S3_BUCKET, Key: key }));
-  if (out.ContentType) res.setHeader("Content-Type", out.ContentType);
-  out.Body.pipe(res);
+/* ---------------- Helpers ---------------- */
+function escapeHtml(s) {
+  return String(s ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
 
-/* ---------------- Email ---------------- */
-let mailer = null;
-function getMailer() {
-  if (mailer) return mailer;
-  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS) return null;
-  mailer = nodemailer.createTransport({
-    host: SMTP_HOST,
-    port: SMTP_PORT,
-    secure: SMTP_PORT === 465,
-    auth: { user: SMTP_USER, pass: SMTP_PASS },
-  });
-  return mailer;
+function qStr(v) {
+  return String(v ?? "").trim();
 }
-async function sendEmail(to, subject, html) {
-  const t = getMailer();
-  if (!t) {
-    console.log("[email skipped] SMTP not configured:", to, subject);
-    return false;
-  }
-  try {
-    await t.sendMail({ from: SMTP_FROM, to, subject, html });
-    return true;
-  } catch (e) {
-    console.error("Email send failed:", e);
-    return false;
-  }
+function int(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return 0;
+  return Math.trunc(x);
+}
+function money(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return "";
+  return `$${x.toFixed(2)}`;
+}
+function rpm(rateAllIn, miles) {
+  const r = Number(rateAllIn);
+  const m = Number(miles);
+  if (!Number.isFinite(r) || !Number.isFinite(m) || m <= 0) return NaN;
+  return r / m;
+}
+function sha256Hex(s) {
+  return crypto.createHash("sha256").update(String(s)).digest("hex");
+}
+function randomToken() {
+  return crypto.randomBytes(32).toString("hex");
 }
 
-/* ---------------- Auth ---------------- */
+/* ---------------- Auth (JWT cookie) ---------------- */
 function signIn(res, user) {
   const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: "7d" });
-  res.cookie("dfx_token", token, { httpOnly: true, sameSite: "lax", secure: true });
+
+  // secure cookies only on HTTPS in production
+  const isProd = String(process.env.NODE_ENV || "").toLowerCase() === "production";
+  res.cookie("dfx_token", token, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: isProd, // Render is HTTPS, but keep dev-friendly
+  });
 }
+
 function getUser(req) {
   try {
     const t = req.cookies?.dfx_token;
@@ -236,12 +176,14 @@ function getUser(req) {
     return null;
   }
 }
+
 function requireAuth(req, res, next) {
   const u = getUser(req);
   if (!u) return res.redirect("/login");
   req.user = u;
   next();
 }
+
 function requireRole(role) {
   return (req, res, next) => {
     if (!req.user) return res.redirect("/login");
@@ -250,33 +192,64 @@ function requireRole(role) {
   };
 }
 
-/* ---------------- Admin bootstrap (THIS IS THE “MISSING PIECE”) ---------------- */
-async function bootstrapAdminIfNeeded() {
-  const email = BOOTSTRAP_ADMIN_EMAIL;
-  if (!email) return;
+/* ---------------- Email (SMTP / SendGrid SMTP) ---------------- */
+let mailer = null;
 
-  const r = await pool.query(`SELECT id, email, role FROM users WHERE email=$1`, [email]);
-  const u = r.rows[0];
+function getMailer() {
+  if (mailer) return mailer;
+  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS) return null;
 
-  if (!u) {
-    console.log("[BOOTSTRAP_ADMIN] No user found for:", email, "(create the account first)");
-    return;
-  }
-  if (u.role === "ADMIN") {
-    console.log("[BOOTSTRAP_ADMIN] Already ADMIN:", email);
-    return;
-  }
+  mailer = nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: SMTP_PORT,
+    secure: SMTP_PORT === 465,
+    auth: { user: SMTP_USER, pass: SMTP_PASS },
+  });
 
-  await pool.query(`UPDATE users SET role='ADMIN' WHERE id=$1`, [u.id]);
-  console.log("[BOOTSTRAP_ADMIN] Promoted to ADMIN:", email);
+  return mailer;
 }
 
-/* ---------------- UI (GREEN/BLACK) ---------------- */
+async function sendEmail(to, subject, html) {
+  const t = getMailer();
+  if (!t) {
+    console.log("[email skipped] Missing SMTP_* env vars. Would send to:", to, subject);
+    return;
+  }
+  try {
+    await t.sendMail({ from: SMTP_FROM, to, subject, html });
+  } catch (e) {
+    console.error("Email send failed:", e);
+  }
+}
+
+/* ---------------- UI (Green/Black) ---------------- */
 const DISCLAIMER_TEXT =
   "Direct Freight Exchange is a technology platform and is not a broker or carrier. Users are responsible for verifying compliance, insurance, and payment terms.";
 
 function layout({ title, user, body }) {
-  const helpFab = `<a class="helpFab" href="/support" title="Talk to a live agent">Help</a>`;
+  const helpButton = `
+    <a class="helpFab" href="/help" title="Help">Help</a>
+  `;
+
+  const footer = `
+    <div class="footer">
+      <div class="footerTop">
+        <div class="footBrand">
+          <div class="footMark">DFX</div>
+          <div>
+            <div class="footName">Direct Freight Exchange</div>
+            <div class="footSub">Direct shipper ↔ carrier • Full transparency loads • Carriers free</div>
+          </div>
+        </div>
+        <div class="footLinks">
+          <a href="/terms">Terms / Disclaimer</a>
+          <a href="/health">Status</a>
+        </div>
+      </div>
+      <div class="footDisclaimer">${escapeHtml(DISCLAIMER_TEXT)}</div>
+    </div>
+  `;
+
   return `<!doctype html>
 <html><head>
 <meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -284,13 +257,17 @@ function layout({ title, user, body }) {
 <style>
 :root{
   --bg:#050607;
-  --panel:rgba(12,16,14,.72);
+  --panel:#0b0f10;
+  --card:#0d1412;
   --line:rgba(255,255,255,.10);
   --text:#eef7f1;
-  --muted:rgba(238,247,241,.70);
+  --muted:rgba(238,247,241,.68);
+
   --green:#22c55e;
+  --green2:#16a34a;
   --lime:#a3e635;
-  --shadow:0 18px 60px rgba(0,0,0,.55);
+
+  --shadow:0 18px 60px rgba(0,0,0,.52);
   --radius:18px;
 }
 *{box-sizing:border-box}
@@ -300,7 +277,7 @@ body{
   background:
     radial-gradient(900px 520px at 12% -8%, rgba(34,197,94,.18), transparent 55%),
     radial-gradient(900px 520px at 92% 0%, rgba(163,230,53,.12), transparent 55%),
-    linear-gradient(180deg, rgba(34,197,94,.10), transparent 45%),
+    linear-gradient(180deg, rgba(34,197,94,.08), transparent 45%),
     var(--bg);
 }
 .wrap{max-width:1200px;margin:0 auto;padding:22px}
@@ -309,25 +286,25 @@ a{color:var(--lime);text-decoration:none} a:hover{text-decoration:underline}
 .nav{
   display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:center;
   padding:14px 16px;border:1px solid var(--line);border-radius:20px;
-  background:var(--panel);backdrop-filter: blur(10px);box-shadow:var(--shadow);
+  background:rgba(13,20,18,.70);backdrop-filter: blur(10px);box-shadow:var(--shadow);
   position:sticky; top:14px; z-index:20;
 }
 .brand{display:flex;gap:12px;align-items:center}
 .mark{
   width:46px;height:46px;border-radius:16px;border:1px solid rgba(255,255,255,.10);
   background: linear-gradient(135deg, rgba(34,197,94,.95), rgba(163,230,53,.65));
-  display:grid;place-items:center; font-weight:1000; color:#06130b;
+  display:grid;place-items:center; font-weight:1000; color:#07120b;
 }
 .sub{color:var(--muted);font-size:12px}
 .right{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
 .pill{
   padding:7px 10px;border-radius:999px;border:1px solid var(--line);
-  background:rgba(6,8,9,.60);color:var(--muted);font-size:12px
+  background:rgba(6,8,9,.65);color:var(--muted);font-size:12px
 }
 .btn{
   display:inline-flex;align-items:center;justify-content:center;gap:8px;
   padding:10px 14px;border-radius:12px;border:1px solid var(--line);
-  background:rgba(6,8,9,.60);color:var(--text);cursor:pointer;
+  background:rgba(6,8,9,.65);color:var(--text);cursor:pointer;
   transition: transform .08s ease, filter .12s ease;
 }
 .btn:hover{filter:brightness(1.06)}
@@ -345,11 +322,11 @@ a{color:var(--lime);text-decoration:none} a:hover{text-decoration:underline}
 }
 .card{
   margin-top:16px;border:1px solid var(--line);border-radius:var(--radius);
-  background:var(--panel);backdrop-filter: blur(10px);box-shadow:var(--shadow);padding:18px
+  background:rgba(13,20,18,.70);backdrop-filter: blur(10px);box-shadow:var(--shadow);padding:18px
 }
 .hero{
   margin-top:16px;border:1px solid var(--line);border-radius:var(--radius);
-  background: linear-gradient(180deg, rgba(12,16,14,.78), rgba(6,8,9,.62));
+  background: linear-gradient(180deg, rgba(13,20,18,.78), rgba(6,8,9,.62));
   backdrop-filter: blur(10px);box-shadow:var(--shadow);padding:20px;position:relative;overflow:hidden;
 }
 .hero:before{
@@ -362,56 +339,71 @@ a{color:var(--lime);text-decoration:none} a:hover{text-decoration:underline}
 .heroInner{position:relative}
 .title{font-size:44px;line-height:1.03;margin:0 0 10px 0;letter-spacing:-.5px}
 .muted{color:var(--muted)}
+.small{font-size:12px;color:var(--muted)}
 .hr{height:1px;background:rgba(255,255,255,.10);margin:14px 0;border:0}
 
 .grid{display:grid;gap:16px;grid-template-columns:1.1fr .9fr;margin-top:16px}
 @media(max-width:980px){.grid{grid-template-columns:1fr}.nav{position:static}.title{font-size:38px}}
 
 .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
-.filters{display:grid;gap:10px;grid-template-columns:1.5fr 1.5fr 1fr 1fr 1fr 1fr 1fr}
+.filters{display:grid;gap:10px;grid-template-columns:1.2fr 1.2fr 1fr 1fr 1fr}
 @media(max-width:980px){.filters{grid-template-columns:1fr 1fr}}
 input,select,textarea{
   width:100%;padding:12px;border-radius:12px;border:1px solid var(--line);
-  background:rgba(6,8,9,.68);color:var(--text);outline:none
+  background:rgba(6,8,9,.72);color:var(--text);outline:none
 }
-textarea{min-height:120px;resize:vertical}
+textarea{min-height:86px;resize:vertical}
 input:focus,select:focus,textarea:focus{border-color:rgba(34,197,94,.55)}
 
 .badge{
   display:inline-flex;gap:8px;align-items:center;padding:6px 10px;border-radius:999px;
-  border:1px solid var(--line);background:rgba(6,8,9,.55);color:var(--muted);font-size:12px
+  border:1px solid var(--line);background:rgba(6,8,9,.62);color:var(--muted);font-size:12px
 }
-.badge.ok{border-color:rgba(34,197,94,.35);background:rgba(34,197,94,.10);color:rgba(219,255,236,.95)}
-.badge.warn{border-color:rgba(163,230,53,.25);background:rgba(163,230,53,.08);color:rgba(240,255,219,.95)}
-.badge.brand{border-color:rgba(34,197,94,.35);background:rgba(34,197,94,.08);color:rgba(219,255,236,.95)}
-
-.load{
-  margin-top:12px;padding:14px;border-radius:16px;border:1px solid rgba(255,255,255,.08);
-  background:rgba(6,8,9,.60)
-}
+.badge.ok{border-color:rgba(34,197,94,.30);background:rgba(34,197,94,.10);color:rgba(219,255,236,.92)}
+.badge.warn{border-color:rgba(163,230,53,.25);background:rgba(163,230,53,.08);color:rgba(240,255,219,.90)}
+.badge.brand{border-color:rgba(34,197,94,.35);background:rgba(34,197,94,.08);color:rgba(219,255,236,.92)}
+.load{margin-top:12px;padding:14px;border-radius:16px;border:1px solid rgba(255,255,255,.08);background:rgba(6,8,9,.62)}
 .loadTop{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
 .lane{font-weight:1000}
-.kv{display:grid;grid-template-columns:220px 1fr;gap:6px;margin-top:10px}
+.kv{display:grid;grid-template-columns:210px 1fr;gap:6px;margin-top:10px}
 @media(max-width:780px){.kv{grid-template-columns:1fr}}
 .k{color:var(--muted)}
 
-.helpFab{
-  position:fixed; right:18px; bottom:18px; z-index:9999;
-  border:1px solid rgba(34,197,94,.28);
-  background:rgba(6,8,9,.72);
+.footer{
+  margin-top:16px;
+  border:1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(6,8,9,.62);
   backdrop-filter: blur(10px);
-  color:var(--text);
-  padding:12px 14px;
-  border-radius:999px;
   box-shadow: var(--shadow);
-  font-weight:900;
+  padding:16px;
 }
-.helpFab:hover{text-decoration:none;filter:brightness(1.08)}
-.small{font-size:12px}
+.footerTop{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:center}
+.footBrand{display:flex;gap:12px;align-items:center}
+.footMark{
+  width:44px;height:44px;border-radius:16px;border:1px solid rgba(255,255,255,.10);
+  background: linear-gradient(135deg, rgba(34,197,94,.95), rgba(163,230,53,.65));
+  display:grid;place-items:center; font-weight:1000; color:#06130b;
+}
+.footName{font-weight:1000}
+.footSub{font-size:12px;color:var(--muted)}
+.footLinks{display:flex;gap:14px;flex-wrap:wrap}
+.footDisclaimer{margin-top:10px;color:var(--muted);font-size:12px;line-height:1.35}
+
+.helpFab{
+  position:fixed; right:18px; bottom:18px; z-index:50;
+  padding:12px 14px; border-radius:999px;
+  border:1px solid rgba(163,230,53,.25);
+  background:rgba(6,8,9,.75); color:var(--text);
+  backdrop-filter: blur(10px);
+  box-shadow: var(--shadow);
+  font-weight:800;
+}
+.helpFab:hover{filter:brightness(1.06)}
 </style>
 </head>
 <body>
-${helpFab}
+${helpButton}
 <div class="wrap">
   <div class="nav">
     <div class="brand">
@@ -426,33 +418,23 @@ ${helpFab}
       <a class="btn ghost" href="/loads">Load Board</a>
       ${
         user
-          ? `<span class="pill">${escapeHtml(user.role)}</span><span class="pill">${escapeHtml(user.email)}</span>
-             <a class="btn primary" href="/dashboard">Dashboard</a>
-             <a class="btn ghost" href="/logout">Logout</a>`
-          : `<a class="btn ghost" href="/signup">Sign up</a>
-             <a class="btn primary" href="/login">Login</a>`
+          ? `<span class="pill">${escapeHtml(user.role)}</span><span class="pill">${escapeHtml(
+              user.email
+            )}</span><a class="btn primary" href="/dashboard">Dashboard</a><a class="btn ghost" href="/logout">Logout</a>`
+          : `<a class="btn ghost" href="/signup">Sign up</a><a class="btn primary" href="/login">Login</a>`
       }
     </div>
   </div>
 
   ${body}
-
-  <div class="card" style="margin-top:16px">
-    <div class="row" style="justify-content:space-between">
-      <div class="muted">${escapeHtml(DISCLAIMER_TEXT)}</div>
-      <div class="row">
-        <a class="btn ghost" href="/terms">Terms</a>
-        <a class="btn ghost" href="/support">Support</a>
-        <a class="btn ghost" href="/health">Status</a>
-      </div>
-    </div>
-  </div>
+  ${footer}
 </div>
 </body></html>`;
 }
 
-/* ---------------- DB schema + migrations ---------------- */
+/* ---------------- DB init + safe migrations (FIXES YOUR token_hash ERROR) ---------------- */
 async function initDb() {
+  // Create base tables
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
       id SERIAL PRIMARY KEY,
@@ -476,19 +458,10 @@ async function initDb() {
 
     CREATE TABLE IF NOT EXISTS carriers_compliance (
       carrier_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      w9_filename TEXT,
       insurance_filename TEXT,
       authority_filename TEXT,
-      w9_filename TEXT,
       insurance_expires TEXT,
-
-      insurance_s3_key TEXT,
-      authority_s3_key TEXT,
-      w9_s3_key TEXT,
-
-      insurance_s3_url TEXT,
-      authority_s3_url TEXT,
-      w9_s3_url TEXT,
-
       status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING','APPROVED','REJECTED')),
       admin_note TEXT,
       updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -497,31 +470,24 @@ async function initDb() {
     CREATE TABLE IF NOT EXISTS loads (
       id SERIAL PRIMARY KEY,
       shipper_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-
       lane_from TEXT NOT NULL,
       lane_to TEXT NOT NULL,
       pickup_date TEXT NOT NULL,
       delivery_date TEXT NOT NULL,
-
       equipment TEXT NOT NULL,
       weight_lbs INTEGER NOT NULL,
       commodity TEXT NOT NULL,
       miles INTEGER NOT NULL,
-
       rate_all_in NUMERIC NOT NULL,
       payment_terms TEXT NOT NULL,
       quickpay_available BOOLEAN NOT NULL DEFAULT false,
-
       detention_rate_per_hr NUMERIC NOT NULL,
       detention_after_hours INTEGER NOT NULL,
-
       appointment_type TEXT NOT NULL,
       accessorials TEXT NOT NULL,
       special_requirements TEXT NOT NULL,
-
       status TEXT NOT NULL DEFAULT 'OPEN' CHECK (status IN ('OPEN','REQUESTED','BOOKED')),
-      booked_carrier_id INTEGER,
-
+      booked_carrier_id INTEGER REFERENCES users(id),
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
 
@@ -537,77 +503,43 @@ async function initDb() {
     CREATE TABLE IF NOT EXISTS password_resets (
       id SERIAL PRIMARY KEY,
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      token_hash TEXT NOT NULL,
-      expires_at TIMESTAMPTZ NOT NULL,
+      token_hash TEXT,
+      expires_at TIMESTAMPTZ,
       used_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
-    CREATE INDEX IF NOT EXISTS idx_password_resets_token_hash ON password_resets(token_hash);
   `);
 
-  // Defensive migrations (fix old DBs)
-  await pool.query(`ALTER TABLE loads ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'OPEN';`);
-  await pool.query(`ALTER TABLE loads ADD COLUMN IF NOT EXISTS booked_carrier_id INTEGER;`);
+  // ✅ Safe migrations for older DBs (prevents “token_hash does not exist”)
+  await pool.query(`ALTER TABLE password_resets ADD COLUMN IF NOT EXISTS token_hash TEXT;`);
+  await pool.query(`ALTER TABLE password_resets ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;`);
+  await pool.query(`ALTER TABLE password_resets ADD COLUMN IF NOT EXISTS used_at TIMESTAMPTZ;`);
+  await pool.query(`ALTER TABLE password_resets ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();`);
+
+  // Indexes (safe)
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_password_resets_user_id ON password_resets(user_id);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_password_resets_token_hash ON password_resets(token_hash);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_loads_created_at ON loads(created_at DESC);`);
 }
 
-/* ============================================================
-   ROUTES START (PART 2 continues with all routes)
-   ============================================================ */
+/* ---------------- Admin bootstrap ---------------- */
+async function bootstrapAdminIfNeeded() {
+  if (!BOOTSTRAP_ADMIN_EMAIL) return;
+  try {
+    const r = await pool.query(`UPDATE users SET role='ADMIN' WHERE email=$1 RETURNING id,email,role`, [
+      BOOTSTRAP_ADMIN_EMAIL,
+    ]);
+    if (r.rows[0]) {
+      console.log("[BOOTSTRAP_ADMIN] set ADMIN for:", r.rows[0].email);
+    } else {
+      console.log("[BOOTSTRAP_ADMIN] email not found:", BOOTSTRAP_ADMIN_EMAIL);
+    }
+  } catch (e) {
+    console.error("[BOOTSTRAP_ADMIN] failed:", e);
+  }
+}
 
-/* ---- Home ---- */
-app.get("/", (req, res) => {
-  const user = getUser(req);
-  const body = `
-    <div class="hero">
-      <div class="heroInner">
-        <div class="row">
-          <span class="badge brand">All-In Pricing</span>
-          <span class="badge brand">Carrier Verified</span>
-          <span class="badge brand">Direct Booking</span>
-        </div>
-        <h2 class="title" style="margin-top:12px">No hidden rates. No phone calls. No broker games.</h2>
-        <div class="muted" style="max-width:900px">
-          Direct shipper ↔ carrier with fully transparent loads: all-in rate, terms, detention, accessorials, appointment type, and notes — visible up front.
-        </div>
-        <div class="hr"></div>
-        <div class="row">
-          <a class="btn primary" href="${user ? "/dashboard" : "/signup"}">${user ? "Go to Dashboard" : "Create account"}</a>
-          <a class="btn ghost" href="/loads">Browse Load Board</a>
-          <a class="btn ghost" href="/terms">Terms</a>
-        </div>
-      </div>
-    </div>
-
-    <div class="grid">
-      <div class="card">
-        <h3 style="margin-top:0">For Shippers</h3>
-        <div class="muted">Subscribe to post loads. Immediate upgrades. Carriers are free.</div>
-        <div class="hr"></div>
-        <div class="row">
-          <span class="badge ok">$99 • 15 loads/mo</span>
-          <span class="badge ok">$199 • 30 loads/mo</span>
-          <span class="badge ok">$399 • Unlimited</span>
-          <a class="btn primary" href="${user?.role === "SHIPPER" ? "/shipper/plans" : "/signup"}">View Plans</a>
-        </div>
-      </div>
-
-      <div class="card">
-        <h3 style="margin-top:0">For Carriers</h3>
-        <div class="muted">Free access. Upload verification docs once to earn Verified badge and unlock requesting loads.</div>
-        <div class="hr"></div>
-        <div class="row">
-          <span class="badge brand">Verified badge</span>
-          <span class="badge brand">Request-to-Book</span>
-          <span class="badge brand">Transparent terms</span>
-          <a class="btn primary" href="${user ? "/dashboard" : "/signup"}">Carrier Dashboard</a>
-        </div>
-      </div>
-    </div>
-  `;
-  res.send(layout({ title: "DFX", user, body }));
-});
-
-/* ---- Terms ---- */
+/* ---------------- Terms ---------------- */
 app.get("/terms", (req, res) => {
   const user = getUser(req);
   const body = `
@@ -626,151 +558,105 @@ app.get("/terms", (req, res) => {
         </ul>
 
         <p><b>No Legal / Financial Advice</b></p>
-        <p>DFX does not provide legal, regulatory, insurance, or financial advice.</p>
+        <p>DFX does not provide legal, regulatory, insurance, or financial advice. Consult qualified professionals as needed.</p>
       </div>
     </div>
   `;
   res.send(layout({ title: "Terms", user, body }));
 });
 
-/* ---- Support ---- */
-app.get("/support", (req, res) => {
+/* ---------------- Help page ---------------- */
+app.get("/help", (req, res) => {
   const user = getUser(req);
   const body = `
     <div class="card">
-      <h2 style="margin-top:0">Support</h2>
-      <div class="muted">Talk to a live agent (we reply to your email).</div>
+      <h2 style="margin-top:0">Help</h2>
+      <div class="muted">Need help right now? Contact support:</div>
       <div class="hr"></div>
-
       <div class="row">
-        <a class="btn primary" href="mailto:${escapeHtml(SUPPORT_EMAIL)}">Email Support</a>
-        ${SUPPORT_PHONE ? `<a class="btn ghost" href="tel:${escapeHtml(SUPPORT_PHONE)}">Call</a>` : ``}
+        <span class="badge brand">Email: support@directfreightexchange.com</span>
+        <span class="badge">Hours: Mon–Fri</span>
       </div>
-
       <div class="hr"></div>
-
-      <form method="POST" action="/support">
-        <div class="filters" style="grid-template-columns:1fr 1fr">
-          <input name="name" placeholder="Your name" required />
-          <input name="email" type="email" placeholder="Your email" required />
-        </div>
-        <div style="margin-top:10px">
-          <textarea name="message" placeholder="How can we help?" required></textarea>
-        </div>
-        <div class="row" style="margin-top:12px">
-          <button class="btn primary" type="submit">Send</button>
-          <a class="btn ghost" href="/">Back</a>
-        </div>
-      </form>
+      ${
+        HELP_CHAT_URL
+          ? `<a class="btn primary" href="${escapeHtml(HELP_CHAT_URL)}" target="_blank" rel="noopener">Chat with live agent</a>`
+          : `<div class="muted small">Live chat link not configured yet. (Optional: set HELP_CHAT_URL in Render Environment)</div>`
+      }
+      <div class="hr"></div>
+      <a class="btn ghost" href="/">Back</a>
     </div>
   `;
-  res.send(layout({ title: "Support", user, body }));
+  res.send(layout({ title: "Help", user, body }));
 });
 
-app.post("/support", async (req, res) => {
+/* ---------------- Home ---------------- */
+app.get("/", (req, res) => {
   const user = getUser(req);
-  const name = qStr(req.body.name);
-  const email = qStr(req.body.email);
-  const message = qStr(req.body.message);
-  if (!name || !email || !message) return res.status(400).send("Missing fields.");
+  const body = `
+    <div class="hero">
+      <div class="heroInner">
+        <div class="row">
+          <span class="badge brand">All-In Pricing</span>
+          <span class="badge brand">Carrier Verified</span>
+          <span class="badge brand">Direct Booking</span>
+        </div>
 
-  const who = user ? `${user.role} • ${user.email}` : "Guest";
-  const html = `
-    <p><b>From:</b> ${escapeHtml(name)} (${escapeHtml(email)})</p>
-    <p><b>User:</b> ${escapeHtml(who)}</p>
-    <p><b>Message:</b><br/>${escapeHtml(message).replaceAll("\n", "<br/>")}</p>
+        <h2 class="title" style="margin-top:12px">No hidden rates. No phone calls. No broker games.</h2>
+        <div class="muted" style="max-width:880px">
+          DFX connects shippers and carriers directly with fully transparent loads:
+          <b>all-in rate</b>, <b>payment terms</b>, <b>detention</b>, <b>accessorials</b>, appointment type, and notes —
+          visible up front so carriers can commit fast and shippers can book with confidence.
+        </div>
+
+        <div class="hr"></div>
+
+        <div class="row">
+          <a class="btn primary" href="${user ? "/dashboard" : "/signup"}">${user ? "Go to Dashboard" : "Create account"}</a>
+          <a class="btn ghost" href="/loads">Browse Load Board</a>
+          <a class="btn ghost" href="/terms">Terms / Disclaimer</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h3 style="margin-top:0">For Shippers</h3>
+        <div class="muted">
+          Post loads with everything included — rate, terms, detention, accessorials — so carriers can book faster.
+          Choose a plan based on your monthly volume.
+        </div>
+        <div class="hr"></div>
+        <div class="row">
+          <span class="badge ok">Starter: 15 loads</span>
+          <span class="badge ok">Growth: 30 loads</span>
+          <span class="badge ok">Enterprise: Unlimited</span>
+          ${
+            user?.role === "SHIPPER"
+              ? `<a class="btn primary" href="/shipper/plans">View Plans</a>`
+              : `<a class="btn primary" href="/signup">Sign up as Shipper</a>`
+          }
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 style="margin-top:0">For Carriers</h3>
+        <div class="muted">
+          Free access to transparent loads. Submit verification documents once, get approved, and request loads directly.
+        </div>
+        <div class="hr"></div>
+        <div class="row">
+          <span class="badge brand">Verified badge</span>
+          <span class="badge brand">Request-to-Book</span>
+          <span class="badge brand">Transparent terms</span>
+        </div>
+      </div>
+    </div>
   `;
-  await sendEmail(SUPPORT_EMAIL, `DFX Support • ${name}`, html);
-
-  res.send(layout({
-    title: "Support Sent",
-    user,
-    body: `<div class="card"><h2 style="margin-top:0">Sent ✅</h2><div class="muted">We’ll reply to your email.</div><div class="hr"></div><a class="btn primary" href="/">Home</a></div>`
-  }));
+  res.send(layout({ title: "DFX", user, body }));
 });
 
-/* ===========================
-   STOP HERE — PART 2 CONTINUES
-   =========================== */
-/* ============================================================
-   DFX — index.js (PART 2 of 2)
-   Paste this directly UNDER PART 1 (same file).
-   ============================================================ */
-
-/* ---------------- Billing gate + monthly usage ---------------- */
-async function getAndNormalizeBilling(shipperId) {
-  const r = await pool.query(`SELECT * FROM shippers_billing WHERE shipper_id=$1`, [shipperId]);
-  let b = r.rows[0];
-  if (!b) {
-    await pool.query(
-      `INSERT INTO shippers_billing (shipper_id,status,plan,monthly_limit,usage_month,loads_used)
-       VALUES ($1,'INACTIVE',NULL,0,$2,0)`,
-      [shipperId, monthKey()]
-    );
-    b = (await pool.query(`SELECT * FROM shippers_billing WHERE shipper_id=$1`, [shipperId])).rows[0];
-  }
-
-  const nowM = monthKey();
-  if (b.usage_month !== nowM) {
-    await pool.query(`UPDATE shippers_billing SET usage_month=$1, loads_used=0, updated_at=NOW() WHERE shipper_id=$2`, [
-      nowM,
-      shipperId,
-    ]);
-    b.usage_month = nowM;
-    b.loads_used = 0;
-  }
-
-  return b;
-}
-
-function postingAllowed(billing) {
-  if (!stripeEnabled) return { ok: true, reason: null }; // dev/testing if Stripe not configured
-  if (billing.status !== "ACTIVE") return { ok: false, reason: "Subscription required (not ACTIVE)." };
-  if (billing.monthly_limit === -1) return { ok: true, reason: null };
-  if (billing.loads_used >= billing.monthly_limit) return { ok: false, reason: "Monthly posting limit reached." };
-  return { ok: true, reason: null };
-}
-
-async function upsertBillingFromSubscription({ shipperId, customerId, subscriptionId, subStatus, priceId }) {
-  const plan = planFromPriceId(priceId);
-  const planDef = plan ? PLANS[plan] : null;
-  const mapped =
-    subStatus === "active"
-      ? "ACTIVE"
-      : subStatus === "past_due"
-      ? "PAST_DUE"
-      : subStatus === "canceled"
-      ? "CANCELED"
-      : "INACTIVE";
-
-  const limit = planDef ? planDef.limit : 0;
-
-  const nowMonth = monthKey();
-  const existing = await pool.query(`SELECT usage_month, loads_used FROM shippers_billing WHERE shipper_id=$1`, [shipperId]);
-  const prevMonth = existing.rows[0]?.usage_month || "";
-  const loadsUsed = existing.rows[0]?.loads_used ?? 0;
-
-  const newMonth = prevMonth && prevMonth === nowMonth ? prevMonth : nowMonth;
-  const newUsed = prevMonth && prevMonth === nowMonth ? loadsUsed : 0;
-
-  await pool.query(
-    `INSERT INTO shippers_billing
-      (shipper_id, stripe_customer_id, stripe_subscription_id, status, plan, monthly_limit, usage_month, loads_used, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
-     ON CONFLICT (shipper_id) DO UPDATE SET
-      stripe_customer_id=EXCLUDED.stripe_customer_id,
-      stripe_subscription_id=EXCLUDED.stripe_subscription_id,
-      status=EXCLUDED.status,
-      plan=EXCLUDED.plan,
-      monthly_limit=EXCLUDED.monthly_limit,
-      usage_month=EXCLUDED.usage_month,
-      loads_used=EXCLUDED.loads_used,
-      updated_at=NOW()`,
-    [shipperId, customerId || null, subscriptionId || null, mapped, plan, limit, newMonth, newUsed]
-  );
-}
-
-/* ---------------- Auth routes ---------------- */
+/* ---------------- Signup/Login/Logout ---------------- */
 app.get("/signup", (req, res) => {
   const user = getUser(req);
   res.send(
@@ -808,6 +694,7 @@ app.post("/signup", async (req, res) => {
     if (!["SHIPPER", "CARRIER"].includes(role)) return res.status(400).send("Invalid role.");
 
     const hash = await bcrypt.hash(password, 12);
+
     const r = await pool.query(
       "INSERT INTO users (email, password_hash, role) VALUES ($1,$2,$3) RETURNING id,email,role",
       [email, hash, role]
@@ -908,7 +795,6 @@ app.post("/forgot", async (req, res) => {
   const user = getUser(req);
   const email = qStr(req.body.email).toLowerCase();
 
-  // Always respond the same (avoid account enumeration)
   const okMsg = `<div class="card"><h2 style="margin-top:0">Check your email</h2>
     <div class="muted">If an account exists for that email, a reset link was sent.</div>
     <div class="hr"></div><a class="btn primary" href="/login">Back to login</a></div>`;
@@ -931,7 +817,9 @@ app.post("/forgot", async (req, res) => {
     await sendEmail(
       u.email,
       "DFX Password Reset",
-      `<p>Click to reset your password:</p><p><a href="${escapeHtml(link)}">${escapeHtml(link)}</a></p><p>This link expires in 30 minutes.</p>`
+      `<p>Click to reset your password:</p>
+       <p><a href="${escapeHtml(link)}">${escapeHtml(link)}</a></p>
+       <p>This link expires in 30 minutes.</p>`
     );
 
     return res.send(layout({ title: "Reset Sent", user, body: okMsg }));
@@ -984,7 +872,6 @@ app.post("/reset", async (req, res) => {
     if (!pr) return res.status(400).send("Reset link invalid or expired.");
 
     const hash = await bcrypt.hash(password, 12);
-
     await pool.query(`UPDATE users SET password_hash=$1 WHERE id=$2`, [hash, pr.user_id]);
     await pool.query(`UPDATE password_resets SET used_at=NOW() WHERE id=$1`, [pr.id]);
 
@@ -1003,7 +890,73 @@ app.post("/reset", async (req, res) => {
   }
 });
 
-/* ---------------- Stripe: plans ---------------- */
+/* ---------------- Billing helpers ---------------- */
+async function getAndNormalizeBilling(shipperId) {
+  const r = await pool.query(`SELECT * FROM shippers_billing WHERE shipper_id=$1`, [shipperId]);
+  let b = r.rows[0];
+  if (!b) {
+    await pool.query(
+      `INSERT INTO shippers_billing (shipper_id,status,plan,monthly_limit,usage_month,loads_used)
+       VALUES ($1,'INACTIVE',NULL,0,$2,0)`,
+      [shipperId, monthKey()]
+    );
+    b = (await pool.query(`SELECT * FROM shippers_billing WHERE shipper_id=$1`, [shipperId])).rows[0];
+  }
+
+  const nowM = monthKey();
+  if (b.usage_month !== nowM) {
+    await pool.query(`UPDATE shippers_billing SET usage_month=$1, loads_used=0, updated_at=NOW() WHERE shipper_id=$2`, [
+      nowM,
+      shipperId,
+    ]);
+    b.usage_month = nowM;
+    b.loads_used = 0;
+  }
+  return b;
+}
+
+function postingAllowed(billing) {
+  if (!stripeEnabled) return { ok: true, reason: null };
+  if (billing.status !== "ACTIVE") return { ok: false, reason: "Subscription required (not ACTIVE)." };
+  if (billing.monthly_limit === -1) return { ok: true, reason: null };
+  if (billing.loads_used >= billing.monthly_limit) return { ok: false, reason: "Monthly posting limit reached." };
+  return { ok: true, reason: null };
+}
+
+async function upsertBillingFromSubscription({ shipperId, customerId, subscriptionId, subStatus, priceId }) {
+  const plan = planFromPriceId(priceId);
+  const planDef = plan ? PLANS[plan] : null;
+  const mapped =
+    subStatus === "active" ? "ACTIVE" : subStatus === "past_due" ? "PAST_DUE" : subStatus === "canceled" ? "CANCELED" : "INACTIVE";
+
+  const limit = planDef ? planDef.limit : 0;
+
+  const nowMonth = monthKey();
+  const existing = await pool.query(`SELECT usage_month, loads_used FROM shippers_billing WHERE shipper_id=$1`, [shipperId]);
+  const prevMonth = existing.rows[0]?.usage_month || "";
+  const loadsUsed = existing.rows[0]?.loads_used ?? 0;
+
+  const newMonth = prevMonth && prevMonth === nowMonth ? prevMonth : nowMonth;
+  const newUsed = prevMonth && prevMonth === nowMonth ? loadsUsed : 0;
+
+  await pool.query(
+    `INSERT INTO shippers_billing
+      (shipper_id, stripe_customer_id, stripe_subscription_id, status, plan, monthly_limit, usage_month, loads_used, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
+     ON CONFLICT (shipper_id) DO UPDATE SET
+      stripe_customer_id=EXCLUDED.stripe_customer_id,
+      stripe_subscription_id=EXCLUDED.stripe_subscription_id,
+      status=EXCLUDED.status,
+      plan=EXCLUDED.plan,
+      monthly_limit=EXCLUDED.monthly_limit,
+      usage_month=EXCLUDED.usage_month,
+      loads_used=EXCLUDED.loads_used,
+      updated_at=NOW()`,
+    [shipperId, customerId || null, subscriptionId || null, mapped, plan, limit, newMonth, newUsed]
+  );
+}
+
+/* ---------------- Stripe: plans page ---------------- */
 app.get("/shipper/plans", requireAuth, requireRole("SHIPPER"), async (req, res) => {
   const user = req.user;
   const bill = await pool.query(`SELECT * FROM shippers_billing WHERE shipper_id=$1`, [user.id]);
@@ -1056,9 +1009,7 @@ app.get("/shipper/plans", requireAuth, requireRole("SHIPPER"), async (req, res) 
                            ? `<span class="badge ok">Current plan</span>`
                            : `<form method="POST" action="/shipper/plan">
                                 <input type="hidden" name="plan" value="${p}">
-                                <button class="btn primary" type="submit">${
-                                  status === "ACTIVE" ? "Switch immediately" : "Subscribe"
-                                }</button>
+                                <button class="btn primary" type="submit">${status === "ACTIVE" ? "Switch immediately" : "Subscribe"}</button>
                               </form>`
                        }
                      </div>`;
@@ -1112,7 +1063,7 @@ app.post("/shipper/plan", requireAuth, requireRole("SHIPPER"), async (req, res) 
   res.redirect("/shipper/plans?switched=1");
 });
 
-/* ---- Stripe: invoices/receipts download ---- */
+/* ---------------- Stripe invoices/receipts download ---------------- */
 app.get("/shipper/billing", requireAuth, requireRole("SHIPPER"), async (req, res) => {
   if (!stripeEnabled) return res.status(400).send("Stripe not configured.");
 
@@ -1120,11 +1071,15 @@ app.get("/shipper/billing", requireAuth, requireRole("SHIPPER"), async (req, res
   const bill = await pool.query(`SELECT * FROM shippers_billing WHERE shipper_id=$1`, [user.id]);
   const b = bill.rows[0];
   if (!b?.stripe_customer_id) {
-    return res.send(layout({
-      title: "Billing",
-      user,
-      body: `<div class="card"><h2 style="margin-top:0">Billing</h2><div class="muted">No Stripe customer yet. Subscribe to a plan first.</div><div class="hr"></div><a class="btn primary" href="/shipper/plans">View Plans</a></div>`
-    }));
+    return res.send(
+      layout({
+        title: "Billing",
+        user,
+        body: `<div class="card"><h2 style="margin-top:0">Billing</h2>
+          <div class="muted">No Stripe customer yet. Subscribe to a plan first.</div>
+          <div class="hr"></div><a class="btn primary" href="/shipper/plans">View Plans</a></div>`,
+      })
+    );
   }
 
   const invoices = await stripe.invoices.list({ customer: b.stripe_customer_id, limit: 50 });
@@ -1141,13 +1096,14 @@ app.get("/shipper/billing", requireAuth, requireRole("SHIPPER"), async (req, res
                 const amount = (inv.amount_paid ?? inv.amount_due ?? 0) / 100;
                 const status = inv.status || "unknown";
                 const url = inv.hosted_invoice_url || inv.invoice_pdf || "";
+                const date = inv.created ? new Date(inv.created * 1000).toISOString().slice(0, 10) : "";
                 return `
                   <div class="load">
                     <div class="row" style="justify-content:space-between">
                       <div><b>${escapeHtml(inv.number || inv.id)}</b></div>
                       <span class="badge ${status === "paid" ? "ok" : "warn"}">${escapeHtml(status)}</span>
                     </div>
-                    <div class="muted">Amount: ${money(amount)} • Date: ${escapeHtml(new Date(inv.created * 1000).toISOString().slice(0,10))}</div>
+                    <div class="muted">Amount: ${money(amount)} • Date: ${escapeHtml(date)}</div>
                     <div class="row" style="margin-top:10px">
                       ${
                         url
@@ -1170,7 +1126,7 @@ app.get("/shipper/billing", requireAuth, requireRole("SHIPPER"), async (req, res
   res.send(layout({ title: "Billing", user, body }));
 });
 
-/* ---- Stripe webhook ---- */
+/* ---------------- Stripe webhook handler ---------------- */
 app.post("/stripe/webhook", async (req, res) => {
   if (!stripeEnabled) return res.sendStatus(400);
 
@@ -1238,9 +1194,8 @@ app.post("/stripe/webhook", async (req, res) => {
   }
 });
 
-/* ---------------- Contracts (Rate Confirmation) ---------------- */
+/* ---------------- Rate Confirmation (auto-filled) ---------------- */
 function renderRateConfirmationHtml({ load, shipperEmail, carrierEmail }) {
-  // Realistic, simple rate confirmation template (HTML)
   const rpmVal = rpm(load.rate_all_in, load.miles);
   return `<!doctype html><html><head><meta charset="utf-8"><title>Rate Confirmation</title>
   <style>
@@ -1267,7 +1222,7 @@ function renderRateConfirmationHtml({ load, shipperEmail, carrierEmail }) {
     <tr><th>Commodity</th><td>${escapeHtml(load.commodity)}</td></tr>
     <tr><th>Weight</th><td>${int(load.weight_lbs).toLocaleString()} lbs</td></tr>
     <tr><th>Miles</th><td>${int(load.miles).toLocaleString()} mi</td></tr>
-    <tr><th>Rate (All-In)</th><td>${money(load.rate_all_in)} (${rpmVal.toFixed(2)} RPM)</td></tr>
+    <tr><th>Rate (All-In)</th><td>${money(load.rate_all_in)} (${Number.isFinite(rpmVal) ? rpmVal.toFixed(2) : "—"} RPM)</td></tr>
     <tr><th>Payment Terms</th><td>${escapeHtml(load.payment_terms)}${load.quickpay_available ? " • QuickPay" : ""}</td></tr>
     <tr><th>Detention</th><td>${money(load.detention_rate_per_hr)}/hr after ${escapeHtml(load.detention_after_hours)} hours</td></tr>
     <tr><th>Accessorials</th><td>${escapeHtml(load.accessorials)}</td></tr>
@@ -1283,7 +1238,7 @@ function renderRateConfirmationHtml({ load, shipperEmail, carrierEmail }) {
   </body></html>`;
 }
 
-/* ---------------- Dashboards ---------------- */
+/* ---------------- Dashboard ---------------- */
 app.get("/dashboard", requireAuth, async (req, res) => {
   const user = req.user;
 
@@ -1334,7 +1289,7 @@ app.get("/dashboard", requireAuth, async (req, res) => {
               <span class="badge">Plan: ${escapeHtml(planLabel)}</span>
               <span class="badge brand">${escapeHtml(limitText)}</span>
               <a class="btn primary" href="/shipper/plans">Manage Plan</a>
-              <a class="btn ghost" href="/shipper/billing">Invoices & Receipts</a>
+              ${stripeEnabled ? `<a class="btn ghost" href="/shipper/billing">Invoices & Receipts</a>` : ``}
             </div>
 
             <div class="hr"></div>
@@ -1398,7 +1353,7 @@ app.get("/dashboard", requireAuth, async (req, res) => {
 
             <div class="hr"></div>
             <h3 style="margin:0 0 10px 0">Contracts</h3>
-            <div class="muted">Rate confirmations auto-fill after booking.</div>
+            <div class="muted">After booking, download an auto-filled Rate Confirmation for that load.</div>
           </div>
 
           <div class="card">
@@ -1417,7 +1372,7 @@ app.get("/dashboard", requireAuth, async (req, res) => {
                       r.request_status === "REQUESTED" ? "warn" : r.request_status === "ACCEPTED" ? "ok" : ""
                     }">${escapeHtml(r.request_status)}</span>
                   </div>
-                  <div class="muted">Carrier: ${escapeHtml(r.carrier_email)} • Compliance: ${escapeHtml(
+                  <div class="muted">Carrier: ${escapeHtml(r.carrier_email)} • Verification: ${escapeHtml(
                         r.carrier_compliance || "PENDING"
                       )}</div>
                   ${
@@ -1469,19 +1424,15 @@ app.get("/dashboard", requireAuth, async (req, res) => {
         [user.id]
       );
 
-      const needsDocs = c.status !== "APPROVED";
-
       const body = `
         <div class="grid">
           <div class="card">
             <div class="row" style="justify-content:space-between">
               <div>
                 <h2 style="margin:0">Carrier Dashboard</h2>
-                <div class="muted">Upload verification docs to earn Verified badge.</div>
+                <div class="muted">Submit verification documents to earn the Verified badge.</div>
               </div>
-              <span class="badge ${c.status === "APPROVED" ? "ok" : "warn"}">Verification: ${escapeHtml(
-        c.status
-      )}</span>
+              <span class="badge ${c.status === "APPROVED" ? "ok" : "warn"}">Verification: ${escapeHtml(c.status)}</span>
             </div>
 
             <div class="hr"></div>
@@ -1507,17 +1458,14 @@ app.get("/dashboard", requireAuth, async (req, res) => {
                 <input type="file" name="authority" accept="application/pdf,image/*" required />
                 <button class="btn primary" type="submit">Submit for Verification</button>
               </div>
-              ${
-                !s3Enabled
-                  ? `<div class="muted small" style="margin-top:10px">Note: S3 is not configured. For production, add S3 env vars so docs persist.</div>`
-                  : `<div class="muted small" style="margin-top:10px">Docs stored securely in S3.</div>`
-              }
+              <div class="muted small" style="margin-top:10px">For production: store docs in S3 (optional upgrade).</div>
             </form>
 
+            <div class="hr"></div>
             ${
-              needsDocs
-                ? `<div class="hr"></div><span class="badge warn">You must be VERIFIED to request loads.</span>`
-                : `<div class="hr"></div><span class="badge ok">Verified — you can request loads.</span>`
+              c.status === "APPROVED"
+                ? `<span class="badge ok">Verified — you can request loads.</span>`
+                : `<span class="badge warn">You must be Verified to request loads.</span>`
             }
           </div>
 
@@ -1548,12 +1496,11 @@ app.get("/dashboard", requireAuth, async (req, res) => {
 
         <div class="card">
           <h3 style="margin-top:0">Find Loads</h3>
-          <div class="muted">Use filters and sort by Newest or RPM.</div>
+          <div class="muted">Default is Newest; you can switch to RPM sorting on the Load Board.</div>
           <div class="hr"></div>
           <a class="btn primary" href="/loads">Go to Load Board</a>
         </div>
       `;
-
       return res.send(layout({ title: "Carrier", user, body }));
     }
 
@@ -1588,17 +1535,6 @@ app.get("/dashboard", requireAuth, async (req, res) => {
                     p.insurance_filename || "—"
                   )}), Authority (${escapeHtml(p.authority_filename || "—")})
             </div>
-
-            ${
-              s3Enabled && (p.w9_s3_key || p.insurance_s3_key || p.authority_s3_key)
-                ? `<div class="row" style="margin-top:10px">
-                     ${p.w9_s3_key ? `<a class="btn ghost" href="/admin/docs/${p.carrier_id}/w9" target="_blank" rel="noopener">View W-9</a>` : ``}
-                     ${p.insurance_s3_key ? `<a class="btn ghost" href="/admin/docs/${p.carrier_id}/insurance" target="_blank" rel="noopener">View COI</a>` : ``}
-                     ${p.authority_s3_key ? `<a class="btn ghost" href="/admin/docs/${p.carrier_id}/authority" target="_blank" rel="noopener">View Authority</a>` : ``}
-                   </div>`
-                : ``
-            }
-
             <div class="row" style="margin-top:10px">
               <form method="POST" action="/admin/carriers/${p.carrier_id}/approve"><button class="btn primary" type="submit">Approve</button></form>
               <form method="POST" action="/admin/carriers/${p.carrier_id}/reject"><button class="btn ghost" type="submit">Reject</button></form>
@@ -1684,6 +1620,7 @@ app.post("/shipper/loads", requireAuth, requireRole("SHIPPER"), async (req, res)
 
 app.post("/shipper/requests/:id/accept", requireAuth, requireRole("SHIPPER"), async (req, res) => {
   const requestId = Number(req.params.id);
+
   const r = await pool.query(
     `
     SELECT lr.*, l.shipper_id, l.status as load_status, l.lane_from, l.lane_to
@@ -1693,7 +1630,6 @@ app.post("/shipper/requests/:id/accept", requireAuth, requireRole("SHIPPER"), as
   `,
     [requestId]
   );
-
   const row = r.rows[0];
   if (!row || row.shipper_id !== req.user.id) return res.sendStatus(404);
   if (row.load_status === "BOOKED") return res.status(400).send("Load already booked.");
@@ -1704,22 +1640,17 @@ app.post("/shipper/requests/:id/accept", requireAuth, requireRole("SHIPPER"), as
 
   const carrierEmail = (await pool.query(`SELECT email FROM users WHERE id=$1`, [row.carrier_id])).rows[0]?.email;
 
-  // email notifications
   await sendEmail(
     req.user.email,
     `DFX Booking Confirmed • Load #${row.load_id}`,
-    `<p><b>Booking confirmed.</b></p><p>Load #${row.load_id}: ${escapeHtml(row.lane_from)} → ${escapeHtml(
-      row.lane_to
-    )}</p><p>Status: BOOKED</p>`
+    `<p><b>Booking confirmed.</b></p><p>Load #${row.load_id}: ${escapeHtml(row.lane_from)} → ${escapeHtml(row.lane_to)}</p><p>Status: BOOKED</p>`
   );
 
   if (carrierEmail) {
     await sendEmail(
       carrierEmail,
       `DFX Request Accepted • Load #${row.load_id}`,
-      `<p><b>Your request was accepted.</b></p><p>Load #${row.load_id}: ${escapeHtml(row.lane_from)} → ${escapeHtml(
-        row.lane_to
-      )}</p><p>Status: BOOKED</p>`
+      `<p><b>Your request was accepted.</b></p><p>Load #${row.load_id}: ${escapeHtml(row.lane_from)} → ${escapeHtml(row.lane_to)}</p><p>Status: BOOKED</p>`
     );
   }
 
@@ -1728,6 +1659,7 @@ app.post("/shipper/requests/:id/accept", requireAuth, requireRole("SHIPPER"), as
 
 app.post("/shipper/requests/:id/decline", requireAuth, requireRole("SHIPPER"), async (req, res) => {
   const requestId = Number(req.params.id);
+
   const r = await pool.query(
     `
     SELECT lr.*, l.shipper_id, l.lane_from, l.lane_to
@@ -1737,7 +1669,6 @@ app.post("/shipper/requests/:id/decline", requireAuth, requireRole("SHIPPER"), a
   `,
     [requestId]
   );
-
   const row = r.rows[0];
   if (!row || row.shipper_id !== req.user.id) return res.sendStatus(404);
 
@@ -1748,9 +1679,7 @@ app.post("/shipper/requests/:id/decline", requireAuth, requireRole("SHIPPER"), a
     await sendEmail(
       carrierEmail,
       `DFX Request Declined • Load #${row.load_id}`,
-      `<p><b>Your request was declined.</b></p><p>Load #${row.load_id}: ${escapeHtml(row.lane_from)} → ${escapeHtml(
-        row.lane_to
-      )}</p>`
+      `<p><b>Your request was declined.</b></p><p>Load #${row.load_id}: ${escapeHtml(row.lane_from)} → ${escapeHtml(row.lane_to)}</p>`
     );
   }
 
@@ -1777,81 +1706,17 @@ app.post(
     if (!w9 || !insurance || !authority) return res.status(400).send("All documents are required.");
     if (!insurance_expires) return res.status(400).send("Insurance expiration is required.");
 
-    // Upload to S3 if enabled (recommended)
-    let w9Key = null,
-      insKey = null,
-      authKey = null,
-      w9Url = null,
-      insUrl = null,
-      authUrl = null;
-
-    try {
-      if (s3Enabled) {
-        const w9Up = await uploadBufferToS3({
-          key: s3KeyForCarrierDoc(req.user.id, "w9", w9.originalname),
-          buffer: w9.buffer,
-          contentType: w9.mimetype,
-        });
-        const insUp = await uploadBufferToS3({
-          key: s3KeyForCarrierDoc(req.user.id, "insurance", insurance.originalname),
-          buffer: insurance.buffer,
-          contentType: insurance.mimetype,
-        });
-        const authUp = await uploadBufferToS3({
-          key: s3KeyForCarrierDoc(req.user.id, "authority", authority.originalname),
-          buffer: authority.buffer,
-          contentType: authority.mimetype,
-        });
-
-        w9Key = w9Up.key;
-        insKey = insUp.key;
-        authKey = authUp.key;
-
-        w9Url = w9Up.url || null;
-        insUrl = insUp.url || null;
-        authUrl = authUp.url || null;
-      }
-    } catch (e) {
-      console.error("S3 upload failed:", e);
-      // Continue without S3 (still store filenames/status)
-    }
-
     await pool.query(
-      `INSERT INTO carriers_compliance (
-         carrier_id,
-         w9_filename, insurance_filename, authority_filename,
-         insurance_expires,
-         w9_s3_key, insurance_s3_key, authority_s3_key,
-         w9_s3_url, insurance_s3_url, authority_s3_url,
-         status, updated_at
-       )
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'PENDING',NOW())
+      `INSERT INTO carriers_compliance (carrier_id, w9_filename, insurance_filename, authority_filename, insurance_expires, status, updated_at)
+       VALUES ($1,$2,$3,$4,$5,'PENDING',NOW())
        ON CONFLICT (carrier_id) DO UPDATE SET
          w9_filename=EXCLUDED.w9_filename,
          insurance_filename=EXCLUDED.insurance_filename,
          authority_filename=EXCLUDED.authority_filename,
          insurance_expires=EXCLUDED.insurance_expires,
-         w9_s3_key=EXCLUDED.w9_s3_key,
-         insurance_s3_key=EXCLUDED.insurance_s3_key,
-         authority_s3_key=EXCLUDED.authority_s3_key,
-         w9_s3_url=EXCLUDED.w9_s3_url,
-         insurance_s3_url=EXCLUDED.insurance_s3_url,
-         authority_s3_url=EXCLUDED.authority_s3_url,
          status='PENDING',
          updated_at=NOW()`,
-      [
-        req.user.id,
-        w9.originalname,
-        insurance.originalname,
-        authority.originalname,
-        insurance_expires,
-        w9Key,
-        insKey,
-        authKey,
-        w9Url,
-        insUrl,
-        authUrl,
-      ]
+      [req.user.id, w9.originalname, insurance.originalname, authority.originalname, insurance_expires]
     );
 
     res.redirect("/dashboard");
@@ -1880,7 +1745,7 @@ app.post("/carrier/loads/:id/request", requireAuth, requireRole("CARRIER"), asyn
   res.redirect("/loads");
 });
 
-/* ---------------- Admin compliance ---------------- */
+/* ---------------- Admin actions ---------------- */
 app.post("/admin/carriers/:id/approve", requireAuth, requireRole("ADMIN"), async (req, res) => {
   const carrierId = Number(req.params.id);
   await pool.query(`UPDATE carriers_compliance SET status='APPROVED', updated_at=NOW(), admin_note=NULL WHERE carrier_id=$1`, [
@@ -1891,41 +1756,16 @@ app.post("/admin/carriers/:id/approve", requireAuth, requireRole("ADMIN"), async
 
 app.post("/admin/carriers/:id/reject", requireAuth, requireRole("ADMIN"), async (req, res) => {
   const carrierId = Number(req.params.id);
-  await pool.query(
-    `UPDATE carriers_compliance SET status='REJECTED', admin_note='Rejected', updated_at=NOW() WHERE carrier_id=$1`,
-    [carrierId]
-  );
+  await pool.query(`UPDATE carriers_compliance SET status='REJECTED', admin_note='Rejected', updated_at=NOW() WHERE carrier_id=$1`, [
+    carrierId,
+  ]);
   res.redirect("/dashboard");
 });
 
-// View docs (ADMIN) — only works with S3 enabled
-app.get("/admin/docs/:carrierId/:docType", requireAuth, requireRole("ADMIN"), async (req, res) => {
-  if (!s3Enabled) return res.status(400).send("S3 not configured.");
-  const carrierId = Number(req.params.carrierId);
-  const docType = qStr(req.params.docType);
-
-  const r = await pool.query(`SELECT * FROM carriers_compliance WHERE carrier_id=$1`, [carrierId]);
-  const c = r.rows[0];
-  if (!c) return res.sendStatus(404);
-
-  const key =
-    docType === "w9"
-      ? c.w9_s3_key
-      : docType === "insurance"
-      ? c.insurance_s3_key
-      : docType === "authority"
-      ? c.authority_s3_key
-      : null;
-
-  if (!key) return res.status(404).send("Doc not found.");
-  return streamS3ObjectToRes(key, res);
-});
-
-/* ---------------- Load board (carrier advanced) ---------------- */
+/* ---------------- Load Board (no max; default actionable; sort newest or rpm) ---------------- */
 app.get("/loads", async (req, res) => {
   const user = getUser(req);
 
-  // default: only OPEN/REQUESTED loads
   const statusFilter = qStr(req.query.status || "actionable"); // actionable|all|open|requested|booked
   const equipment = qStr(req.query.equipment || "");
   const minMiles = qStr(req.query.minMiles || "");
@@ -1937,7 +1777,6 @@ app.get("/loads", async (req, res) => {
   const where = [];
   const params = [];
 
-  // Status filter
   if (statusFilter === "actionable") {
     where.push(`l.status IN ('OPEN','REQUESTED')`);
   } else if (statusFilter === "open") {
@@ -1946,7 +1785,7 @@ app.get("/loads", async (req, res) => {
     where.push(`l.status='REQUESTED'`);
   } else if (statusFilter === "booked") {
     where.push(`l.status='BOOKED'`);
-  } // "all" => no filter
+  }
 
   if (equipment) {
     params.push(equipment);
@@ -2000,9 +1839,7 @@ app.get("/loads", async (req, res) => {
         </div>
         ${
           user?.role === "CARRIER"
-            ? `<span class="badge ${carrierBadge === "APPROVED" ? "ok" : "warn"}">Carrier: ${escapeHtml(
-                carrierBadge
-              )}</span>`
+            ? `<span class="badge ${carrierBadge === "APPROVED" ? "ok" : "warn"}">Carrier: ${escapeHtml(carrierBadge)}</span>`
             : user?.role === "SHIPPER"
             ? `<a class="btn primary" href="/shipper/plans">Plans</a>`
             : ``
@@ -2118,7 +1955,7 @@ function loadCard(l, user, carrierBadge, opts = {}) {
   `;
 }
 
-/* ---------------- Rate confirmation download (shipper) ---------------- */
+/* ---------------- Rate confirmation download (shipper only) ---------------- */
 app.get("/shipper/load/:id/rate-confirmation", requireAuth, requireRole("SHIPPER"), async (req, res) => {
   const loadId = Number(req.params.id);
   const r = await pool.query(`SELECT * FROM loads WHERE id=$1`, [loadId]);
@@ -2145,7 +1982,6 @@ app.get("/health", (_, res) =>
     ok: true,
     stripeEnabled,
     smtpEnabled: !!getMailer(),
-    s3Enabled,
   })
 );
 
@@ -2159,7 +1995,3 @@ initDb()
     console.error("DB init failed:", e);
     process.exit(1);
   });
-
-/* ============================================================
-   END — index.js
-   ============================================================ */
