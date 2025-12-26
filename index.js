@@ -9,9 +9,10 @@ const nodemailer = require("nodemailer");
 
 const app = express();
 
-// Stripe webhook needs raw body only on this route:
-app.post("/stripe/webhook", express.raw({ type: "application/json" }));
+// IMPORTANT: Stripe webhook needs RAW body only for this route (do NOT use express.urlencoded/json on it).
+// We'll define the webhook route with express.raw middleware below.
 
+// Body parsers (for normal forms/pages)
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
@@ -28,12 +29,16 @@ const STRIPE_PRICE_STARTER = process.env.STRIPE_PRICE_STARTER;
 const STRIPE_PRICE_GROWTH = process.env.STRIPE_PRICE_GROWTH;
 const STRIPE_PRICE_ENTERPRISE = process.env.STRIPE_PRICE_ENTERPRISE;
 
-// SMTP (optional, for email notifications)
+// SMTP (optional, for email notifications + support)
 const SMTP_HOST = process.env.SMTP_HOST;
 const SMTP_PORT = Number(process.env.SMTP_PORT || "587");
 const SMTP_USER = process.env.SMTP_USER;
 const SMTP_PASS = process.env.SMTP_PASS;
 const SMTP_FROM = process.env.SMTP_FROM || "no-reply@directfreightexchange.com";
+
+// Support
+const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || "support@directfreightexchange.com";
+const SUPPORT_PHONE = process.env.SUPPORT_PHONE || ""; // optional, e.g. "+13125551234"
 
 if (!DATABASE_URL) return bootFail("Missing DATABASE_URL");
 if (!JWT_SECRET) return bootFail("Missing JWT_SECRET");
@@ -49,11 +54,14 @@ const stripeEnabled = !!(
 const stripe = stripeEnabled ? new Stripe(STRIPE_SECRET_KEY) : null;
 
 function bootFail(msg) {
-  app.get("*", (_, res) => res.send(`<h1>Config error</h1><p>${msg}</p>`));
+  app.get("*", (_, res) => res.send(`<h1>Config error</h1><p>${escapeHtml(msg)}</p>`));
   app.listen(PORT, "0.0.0.0");
 }
 
-const pool = new Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } });
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+});
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -99,8 +107,10 @@ function int(n) {
   return Math.trunc(x);
 }
 
+/* ---------------- Auth helpers ---------------- */
 function signIn(res, user) {
   const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: "7d" });
+  // NOTE: secure: true requires HTTPS (Render provides HTTPS on *.onrender.com)
   res.cookie("dfx_token", token, { httpOnly: true, sameSite: "lax", secure: true });
 }
 function getUser(req) {
@@ -171,11 +181,16 @@ function layout({ title, user, body }) {
         </div>
         <div class="footLinks">
           <a href="/terms">Terms / Disclaimer</a>
+          <a href="/support">Support</a>
           <a href="/health">Status</a>
         </div>
       </div>
       <div class="footDisclaimer">${escapeHtml(DISCLAIMER_TEXT)}</div>
     </div>
+  `;
+
+  const helpFab = `
+    <a class="helpFab" href="/support">Help</a>
   `;
 
   return `<!doctype html>
@@ -279,7 +294,7 @@ input,select,textarea{
   width:100%;padding:12px;border-radius:12px;border:1px solid var(--line);
   background:rgba(6,8,9,.72);color:var(--text);outline:none
 }
-textarea{min-height:86px;resize:vertical}
+textarea{min-height:120px;resize:vertical}
 input:focus,select:focus,textarea:focus{border-color:rgba(34,197,94,.55)}
 
 .badge{
@@ -316,33 +331,53 @@ input:focus,select:focus,textarea:focus{border-color:rgba(34,197,94,.55)}
 .footSub{font-size:12px;color:var(--muted)}
 .footLinks{display:flex;gap:14px;flex-wrap:wrap}
 .footDisclaimer{margin-top:10px;color:var(--muted);font-size:12px;line-height:1.35}
+
+.helpFab{
+  position:fixed;
+  right:18px;
+  bottom:18px;
+  z-index:9999;
+  border:1px solid rgba(163,230,53,.25);
+  background:rgba(6,8,9,.72);
+  backdrop-filter: blur(10px);
+  color:var(--text);
+  padding:12px 14px;
+  border-radius:999px;
+  box-shadow: var(--shadow);
+  font-weight:900;
+}
+.helpFab:hover{filter:brightness(1.08); text-decoration:none}
 </style>
 </head>
-<body><div class="wrap">
-<div class="nav">
-  <div class="brand">
-    <div class="mark">DFX</div>
-    <div>
-      <div style="font-weight:1000">Direct Freight Exchange</div>
-      <div class="sub">Direct shipper ↔ carrier • Full transparency loads • Carriers free</div>
+<body>
+${helpFab}
+<div class="wrap">
+  <div class="nav">
+    <div class="brand">
+      <div class="mark">DFX</div>
+      <div>
+        <div style="font-weight:1000">Direct Freight Exchange</div>
+        <div class="sub">Direct shipper ↔ carrier • Full transparency loads • Carriers free</div>
+      </div>
+    </div>
+    <div class="right">
+      <a class="btn ghost" href="/">Home</a>
+      <a class="btn ghost" href="/loads">Load Board</a>
+      ${user
+        ? `<span class="pill">${escapeHtml(user.role)}</span><span class="pill">${escapeHtml(user.email)}</span>
+           <a class="btn green" href="/dashboard">Dashboard</a><a class="btn ghost" href="/logout">Logout</a>`
+        : `<a class="btn ghost" href="/signup">Sign up</a><a class="btn green" href="/login">Login</a>`}
     </div>
   </div>
-  <div class="right">
-    <a class="btn ghost" href="/">Home</a>
-    <a class="btn ghost" href="/loads">Load Board</a>
-    ${user
-      ? `<span class="pill">${escapeHtml(user.role)}</span><span class="pill">${escapeHtml(user.email)}</span>
-         <a class="btn green" href="/dashboard">Dashboard</a><a class="btn ghost" href="/logout">Logout</a>`
-      : `<a class="btn ghost" href="/signup">Sign up</a><a class="btn green" href="/login">Login</a>`}
-  </div>
+  ${body}
+  ${footer}
 </div>
-${body}
-${footer}
-</div></body></html>`;
+</body></html>`;
 }
 
-/* ---------- DB ---------- */
+/* ---------- DB + automatic migrations ---------- */
 async function initDb() {
+  // Base tables (safe for new installs)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
       id SERIAL PRIMARY KEY,
@@ -358,7 +393,7 @@ async function initDb() {
       stripe_subscription_id TEXT,
       status TEXT NOT NULL DEFAULT 'INACTIVE' CHECK (status IN ('INACTIVE','ACTIVE','PAST_DUE','CANCELED')),
       plan TEXT CHECK (plan IN ('STARTER','GROWTH','ENTERPRISE')),
-      monthly_limit INTEGER NOT NULL DEFAULT 0,            -- -1 means unlimited
+      monthly_limit INTEGER NOT NULL DEFAULT 0,
       usage_month TEXT NOT NULL DEFAULT '',
       loads_used INTEGER NOT NULL DEFAULT 0,
       updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -400,9 +435,6 @@ async function initDb() {
       accessorials TEXT NOT NULL,
       special_requirements TEXT NOT NULL,
 
-      status TEXT NOT NULL DEFAULT 'OPEN' CHECK (status IN ('OPEN','REQUESTED','BOOKED')),
-      booked_carrier_id INTEGER REFERENCES users(id),
-
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
 
@@ -414,6 +446,24 @@ async function initDb() {
       created_at TIMESTAMPTZ DEFAULT NOW(),
       UNIQUE(load_id, carrier_id)
     );
+  `);
+
+  // Automatic migrations (safe to run on every boot)
+  await pool.query(`ALTER TABLE loads ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'OPEN';`);
+  await pool.query(`ALTER TABLE loads ADD COLUMN IF NOT EXISTS booked_carrier_id INTEGER;`);
+
+  // Add FK constraint if missing
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'loads_booked_carrier_id_fkey'
+      ) THEN
+        ALTER TABLE loads
+          ADD CONSTRAINT loads_booked_carrier_id_fkey
+          FOREIGN KEY (booked_carrier_id) REFERENCES users(id);
+      END IF;
+    END $$;
   `);
 }
 
@@ -484,6 +534,75 @@ app.get("/terms", (req, res) => {
     </div>
   `;
   res.send(layout({ title: "Terms", user, body }));
+});
+
+/* ---------- Support (Help button) ---------- */
+app.get("/support", (req, res) => {
+  const user = getUser(req);
+  const body = `
+    <div class="card">
+      <h2 style="margin-top:0">Support</h2>
+      <div class="muted">Message a live agent. We'll respond as quickly as possible.</div>
+      <div class="hr"></div>
+
+      <div class="row">
+        <span class="badge brand">Email support</span>
+        <a class="btn ghost" href="mailto:${escapeHtml(SUPPORT_EMAIL)}">${escapeHtml(SUPPORT_EMAIL)}</a>
+        ${SUPPORT_PHONE ? `<a class="btn ghost" href="tel:${escapeHtml(SUPPORT_PHONE)}">Call</a>` : ``}
+      </div>
+
+      <div class="hr"></div>
+
+      <form method="POST" action="/support">
+        <div class="filters" style="grid-template-columns:1fr 1fr">
+          <input name="name" placeholder="Your name" required />
+          <input name="email" type="email" placeholder="Your email" required />
+        </div>
+        <div style="margin-top:10px">
+          <textarea name="message" placeholder="How can we help?" required></textarea>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <button class="btn green" type="submit">Send to agent</button>
+          <a class="btn ghost" href="/">Back home</a>
+        </div>
+        <div class="muted" style="margin-top:10px">
+          Tip: For fastest help, include your role (shipper/carrier) and what page you were on.
+        </div>
+      </form>
+    </div>
+  `;
+  res.send(layout({ title: "Support", user, body }));
+});
+
+app.post("/support", async (req, res) => {
+  const user = getUser(req);
+  const name = String(req.body.name || "").trim();
+  const email = String(req.body.email || "").trim();
+  const message = String(req.body.message || "").trim();
+
+  if (!name || !email || !message) return res.status(400).send("Missing fields.");
+
+  const who = user ? `${user.role} • ${user.email}` : "Guest";
+  const html = `
+    <p><b>From:</b> ${escapeHtml(name)} (${escapeHtml(email)})</p>
+    <p><b>User:</b> ${escapeHtml(who)}</p>
+    <p><b>Message:</b><br/>${escapeHtml(message).replaceAll("\n", "<br/>")}</p>
+  `;
+
+  await sendEmail(SUPPORT_EMAIL, `DFX Support • ${name}`, html);
+
+  const body = `
+    <div class="card">
+      <h2 style="margin-top:0">Sent ✅</h2>
+      <div class="muted">Your message was sent to a live agent. We'll reply to your email.</div>
+      <div class="hr"></div>
+      <div class="row">
+        <a class="btn green" href="/">Back to Home</a>
+        <a class="btn ghost" href="/loads">Load Board</a>
+      </div>
+    </div>
+  `;
+  res.send(layout({ title: "Support Sent", user, body }));
 });
 
 /* ---------- Stripe routes ---------- */
@@ -592,7 +711,8 @@ app.post("/shipper/plan", requireAuth, requireRole("SHIPPER"), async (req, res) 
   res.redirect("/shipper/plans?switched=1");
 });
 
-app.post("/stripe/webhook", async (req, res) => {
+// Stripe webhook (raw body only here)
+app.post("/stripe/webhook", express.raw({ type: "application/json" }), async (req, res) => {
   if (!stripeEnabled) return res.sendStatus(400);
 
   let event;
@@ -709,11 +829,17 @@ app.post("/signup", async (req, res) => {
         [r.rows[0].id, monthKey()]
       );
     } else {
-      await pool.query(`INSERT INTO carriers_compliance (carrier_id,status) VALUES ($1,'PENDING') ON CONFLICT DO NOTHING`, [r.rows[0].id]);
+      await pool.query(
+        `INSERT INTO carriers_compliance (carrier_id,status) VALUES ($1,'PENDING') ON CONFLICT DO NOTHING`,
+        [r.rows[0].id]
+      );
     }
 
     signIn(res, r.rows[0]);
-    res.redirect("/dashboard");
+
+    // Carrier must onboard immediately
+    if (role === "CARRIER") return res.redirect("/carrier/onboarding");
+    return res.redirect("/dashboard");
   } catch (e) {
     if (String(e).includes("duplicate")) return res.status(409).send("Email already exists. Go to /login.");
     console.error(e);
@@ -751,6 +877,15 @@ app.post("/login", async (req, res) => {
     const ok = await bcrypt.compare(password, u.password_hash);
     if (!ok) return res.status(401).send("Wrong password.");
     signIn(res, u);
+
+    // If carrier is missing docs, force onboarding
+    if (u.role === "CARRIER") {
+      const comp = await pool.query(`SELECT * FROM carriers_compliance WHERE carrier_id=$1`, [u.id]);
+      const c = comp.rows[0];
+      const missingDocs = !c?.insurance_filename || !c?.authority_filename || !c?.w9_filename;
+      if (missingDocs) return res.redirect("/carrier/onboarding");
+    }
+
     res.redirect("/dashboard");
   } catch (e) {
     console.error(e);
@@ -760,7 +895,7 @@ app.post("/login", async (req, res) => {
 
 app.get("/logout", (req, res) => { res.clearCookie("dfx_token"); res.redirect("/"); });
 
-/* ---------- Home (polished hero + badges) ---------- */
+/* ---------- Home ---------- */
 app.get("/", (req, res) => {
   const user = getUser(req);
 
@@ -819,6 +954,7 @@ app.get("/", (req, res) => {
           <span class="badge brand">Verified badge</span>
           <span class="badge brand">Request-to-Book</span>
           <span class="badge brand">Transparent terms</span>
+          ${user?.role === "CARRIER" ? `<a class="btn green" href="/carrier/onboarding">Upload Docs</a>` : ``}
         </div>
       </div>
     </div>
@@ -860,6 +996,53 @@ function postingAllowed(billing) {
   if (billing.loads_used >= billing.monthly_limit) return { ok: false, reason: "Monthly posting limit reached." };
   return { ok: true, reason: null };
 }
+
+/* ---------- Carrier onboarding (required) ---------- */
+app.get("/carrier/onboarding", requireAuth, requireRole("CARRIER"), async (req, res) => {
+  const user = req.user;
+  const comp = await pool.query(`SELECT * FROM carriers_compliance WHERE carrier_id=$1`, [user.id]);
+  const c = comp.rows[0] || { status: "PENDING" };
+
+  const missingDocs = !c.insurance_filename || !c.authority_filename || !c.w9_filename;
+
+  const body = `
+    <div class="card">
+      <h2 style="margin-top:0">Carrier Verification (Required)</h2>
+      <div class="muted">
+        Upload your documents to receive the <b>Carrier Verified</b> badge and unlock load requests.
+      </div>
+      <div class="hr"></div>
+
+      <div class="row">
+        <span class="badge ${c.status === "APPROVED" ? "ok" : "warn"}">Status: ${escapeHtml(c.status || "PENDING")}</span>
+        ${c.status === "APPROVED" ? `<span class="badge ok">Verified Badge Active</span>` : `<span class="badge warn">Verification Pending</span>`}
+        ${missingDocs ? `<span class="badge warn">Docs Required</span>` : `<span class="badge ok">Docs Submitted</span>`}
+      </div>
+
+      <div class="hr"></div>
+
+      <form method="POST" action="/carrier/compliance" enctype="multipart/form-data">
+        <div class="filters" style="grid-template-columns:1.2fr 1.2fr 1fr 1fr 1fr">
+          <input name="insurance_expires" placeholder="Insurance expires (YYYY-MM-DD)" value="${escapeHtml(c.insurance_expires || "")}" required />
+          <input type="file" name="insurance" accept="application/pdf,image/*" required />
+          <input type="file" name="authority" accept="application/pdf,image/*" required />
+          <input type="file" name="w9" accept="application/pdf,image/*" required />
+          <button class="btn green" type="submit">Submit for Verification</button>
+        </div>
+        <div class="muted" style="margin-top:10px">
+          After submission, an admin will review and approve your profile.
+        </div>
+      </form>
+
+      <div class="hr"></div>
+      <div class="row">
+        <a class="btn ghost" href="/loads">Browse Loads</a>
+        <a class="btn ghost" href="/support">Need help?</a>
+      </div>
+    </div>
+  `;
+  res.send(layout({ title: "Carrier Onboarding", user, body }));
+});
 
 /* ---------- Dashboards ---------- */
 app.get("/dashboard", requireAuth, async (req, res) => {
@@ -994,6 +1177,10 @@ app.get("/dashboard", requireAuth, async (req, res) => {
       const comp = await pool.query(`SELECT * FROM carriers_compliance WHERE carrier_id=$1`, [user.id]);
       const c = comp.rows[0] || { status: "PENDING" };
 
+      // Enforce onboarding: must upload docs before using carrier dashboard
+      const missingDocs = !c.insurance_filename || !c.authority_filename || !c.w9_filename;
+      if (missingDocs) return res.redirect("/carrier/onboarding");
+
       const myReqs = await pool.query(`
         SELECT lr.*, l.lane_from, l.lane_to, l.status as load_status
         FROM load_requests lr
@@ -1018,16 +1205,14 @@ app.get("/dashboard", requireAuth, async (req, res) => {
 
             <div class="hr"></div>
 
-            <form method="POST" action="/carrier/compliance" enctype="multipart/form-data">
-              <div class="filters" style="grid-template-columns:1.2fr 1.2fr 1fr 1fr 1fr">
-                <input name="insurance_expires" placeholder="Insurance expires (YYYY-MM-DD)" value="${escapeHtml(c.insurance_expires || "")}" required />
-                <input type="file" name="insurance" accept="application/pdf,image/*" required />
-                <input type="file" name="authority" accept="application/pdf,image/*" required />
-                <input type="file" name="w9" accept="application/pdf,image/*" required />
-                <button class="btn green" type="submit">Upload Docs</button>
-              </div>
-              <div class="muted" style="margin-top:10px">Next: store docs on S3 (recommended for production).</div>
-            </form>
+            <div class="row">
+              ${c.status === "APPROVED"
+                ? `<span class="badge ok">Carrier Verified</span>`
+                : `<span class="badge warn">Verification Pending</span>`
+              }
+              <a class="btn ghost" href="/carrier/onboarding">Update Docs</a>
+              <a class="btn ghost" href="/support">Help</a>
+            </div>
           </div>
 
           <div class="card">
@@ -1159,7 +1344,6 @@ app.post("/shipper/requests/:id/accept", requireAuth, requireRole("SHIPPER"), as
   await pool.query(`UPDATE load_requests SET status='DECLINED' WHERE load_id=$1 AND id<>$2`, [row.load_id, requestId]);
   await pool.query(`UPDATE loads SET status='BOOKED', booked_carrier_id=$1 WHERE id=$2`, [row.carrier_id, row.load_id]);
 
-  // Email notifications
   const carrierEmail = (await pool.query(`SELECT email FROM users WHERE id=$1`, [row.carrier_id])).rows[0]?.email;
   const shipperEmail = req.user.email;
 
@@ -1194,7 +1378,6 @@ app.post("/shipper/requests/:id/decline", requireAuth, requireRole("SHIPPER"), a
 
   await pool.query(`UPDATE load_requests SET status='DECLINED' WHERE id=$1`, [requestId]);
 
-  // Email notifications
   const carrierEmail = (await pool.query(`SELECT email FROM users WHERE id=$1`, [row.carrier_id])).rows[0]?.email;
   if (carrierEmail) {
     await sendEmail(
@@ -1236,7 +1419,8 @@ app.post(
       [req.user.id, insurance.originalname, authority.originalname, w9.originalname, insurance_expires]
     );
 
-    res.redirect("/dashboard");
+    // After docs submission, keep them on onboarding page
+    res.redirect("/carrier/onboarding");
   }
 );
 
@@ -1361,6 +1545,7 @@ app.get("/health", async (_, res) => {
   }
 });
 
+/* ---------- Start ---------- */
 initDb()
   .then(() => app.listen(PORT, "0.0.0.0", () => console.log("Server running on port", PORT)))
-  .catch((e) => { console.error("DB init failed:", e); process.exit(1); });
+  .catch((e) => { console.error("DB init/migrations failed:", e); process.exit(1); });
