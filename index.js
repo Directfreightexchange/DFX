@@ -23,7 +23,7 @@ app.use(cookieParser());
 const PORT = process.env.PORT || 3000;
 
 // Change this whenever you paste a new file so you can confirm deploy instantly.
-const BUILD_VERSION = process.env.BUILD_VERSION || "2025-12-31-loadboard-v2";
+const BUILD_VERSION = process.env.BUILD_VERSION || "2025-12-31-loadboard-v2-fix1";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -260,7 +260,6 @@ ${extraHead}
 :root{
   --bg:#050607;
   --line:rgba(255,255,255,.10);
-  --line2:rgba(255,255,255,.08);
   --text:#eef7f1;
   --muted:rgba(238,247,241,.68);
   --green:#22c55e;
@@ -414,10 +413,6 @@ input:focus,select:focus,textarea:focus{border-color:rgba(34,197,94,.55)}
 }
 .loadTop{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
 .lane{font-weight:1000;font-size:16px}
-.kv{display:grid;grid-template-columns: 180px 1fr;gap:6px;margin-top:10px}
-@media(max-width:720px){.kv{grid-template-columns: 1fr}}
-.k{color:var(--muted)}
-.v{color:rgba(238,247,241,.92)}
 .chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
 .chip{
   display:inline-flex;align-items:center;gap:8px;
@@ -457,7 +452,12 @@ ${extraScript}
 }
 
 /* ---------- DB ---------- */
+/**
+ * IMPORTANT FIX:
+ * If sqlType includes "DEFAULT ''", we MUST escape single quotes inside the EXECUTE string.
+ */
 async function ensureColumn(table, column, sqlType) {
+  const safeSqlType = String(sqlType).replace(/'/g, "''"); // <- FIX
   await pool.query(`
     DO $$
     BEGIN
@@ -465,7 +465,7 @@ async function ensureColumn(table, column, sqlType) {
         SELECT 1 FROM information_schema.columns
         WHERE table_name='${table}' AND column_name='${column}'
       ) THEN
-        EXECUTE 'ALTER TABLE ${table} ADD COLUMN ${column} ${sqlType}';
+        EXECUTE 'ALTER TABLE ${table} ADD COLUMN ${column} ${safeSqlType}';
       END IF;
     END$$;
   `);
@@ -546,7 +546,7 @@ async function initDb() {
     );
   `);
 
-  // migrations for older dbs
+  // migrations for older DBs
   await ensureColumn("loads", "status", "TEXT NOT NULL DEFAULT 'OPEN'");
   await ensureColumn("loads", "appointment_type", "TEXT NOT NULL DEFAULT 'FCFS'");
   await ensureColumn("loads", "accessorials", "TEXT NOT NULL DEFAULT ''");
@@ -620,12 +620,7 @@ app.get("/", (req, res) => {
     body: `
       <div class="hero">
         <div class="heroInner">
-          <div class="row">
-            <span class="badge brand">All-In Pricing</span>
-            <span class="badge brand">Carrier Verified</span>
-            <span class="badge brand">Direct Booking</span>
-          </div>
-          <h2 class="title" style="margin-top:12px">Direct shipper ↔ carrier marketplace</h2>
+          <h2 class="title" style="margin-top:0">Direct shipper ↔ carrier marketplace</h2>
           <div class="muted" style="max-width:980px">
             Transparent loads: rate, payment terms, detention, accessorials, appointment type, and requirements — all visible up front.
           </div>
@@ -871,38 +866,7 @@ app.post("/reset", async (req, res) => {
   res.redirect("/dashboard");
 });
 
-/* ---------- Billing gate + monthly usage ---------- */
-async function getAndNormalizeBilling(shipperId) {
-  const r = await pool.query(`SELECT * FROM shippers_billing WHERE shipper_id=$1`, [shipperId]);
-  let b = r.rows[0];
-  if (!b) {
-    await pool.query(
-      `INSERT INTO shippers_billing (shipper_id,status,plan,monthly_limit,usage_month,loads_used)
-       VALUES ($1,'INACTIVE',NULL,0,$2,0)`,
-      [shipperId, monthKey()]
-    );
-    b = (await pool.query(`SELECT * FROM shippers_billing WHERE shipper_id=$1`, [shipperId])).rows[0];
-  }
-  const nowM = monthKey();
-  if (b.usage_month !== nowM) {
-    await pool.query(
-      `UPDATE shippers_billing SET usage_month=$1, loads_used=0, updated_at=NOW() WHERE shipper_id=$2`,
-      [nowM, shipperId]
-    );
-    b.usage_month = nowM;
-    b.loads_used = 0;
-  }
-  return b;
-}
-function postingAllowed(billing) {
-  if (!stripeEnabled) return { ok: true, reason: null };
-  if (billing.status !== "ACTIVE") return { ok: false, reason: "Subscription required (not ACTIVE)." };
-  if (billing.monthly_limit === -1) return { ok: true, reason: null };
-  if (billing.loads_used >= billing.monthly_limit) return { ok: false, reason: "Monthly posting limit reached." };
-  return { ok: true, reason: null };
-}
-
-/* ---------- Dashboard (shipper + carrier + admin) ---------- */
+/* ---------- Dashboard helpers ---------- */
 function rpmForLoad(l) {
   const miles = Number(l.miles);
   const rate = Number(l.rate_all_in);
@@ -916,88 +880,66 @@ function equipmentOptionsHtml(selected) {
   return opts.join("");
 }
 
+/* ---------- Dashboards ---------- */
 app.get("/dashboard", requireAuth, async (req, res) => {
   const user = req.user;
 
   if (user.role === "SHIPPER") {
-    const billing = await getAndNormalizeBilling(user.id);
-    const gate = postingAllowed(billing);
-
-    const planLabel = billing.plan ? PLANS[billing.plan]?.label : "None";
-    const limitText = billing.monthly_limit === -1 ? "Unlimited" : `${billing.loads_used} / ${billing.monthly_limit} used this month`;
-
     const myLoads = await pool.query(`SELECT * FROM loads WHERE shipper_id=$1 ORDER BY created_at DESC`, [user.id]);
 
     const body = `
       <div class="card">
-        <div class="row" style="justify-content:space-between">
-          <div>
-            <h2 style="margin:0">Shipper Dashboard</h2>
-            <div class="muted">Post loads and manage booking requests.</div>
-          </div>
-          <span class="badge ${billing.status === "ACTIVE" ? "ok" : "warn"}">Billing: ${escapeHtml(billing.status)}</span>
-        </div>
-
-        <div class="hr"></div>
-
-        <div class="row">
-          <span class="badge">Plan: ${escapeHtml(planLabel)}</span>
-          <span class="badge brand">${escapeHtml(limitText)}</span>
-          <a class="btn green" href="/shipper/plans">Manage Plan</a>
-        </div>
+        <h2 style="margin:0">Shipper Dashboard</h2>
+        <div class="muted">Post loads and manage activity.</div>
 
         <div class="hr"></div>
 
         <h3 style="margin:0 0 10px 0">Post a load</h3>
-        ${gate.ok ? `
-          <form method="POST" action="/shipper/loads">
-            <div class="threeCol">
-              <input name="lane_from" placeholder="From (City, ST)" required />
-              <input name="lane_to" placeholder="To (City, ST)" required />
-              <select name="equipment" required>${equipmentOptionsHtml("")}</select>
+        <form method="POST" action="/shipper/loads">
+          <div class="threeCol">
+            <input name="lane_from" placeholder="From (City, ST)" required />
+            <input name="lane_to" placeholder="To (City, ST)" required />
+            <select name="equipment" required>${equipmentOptionsHtml("")}</select>
 
-              <input name="pickup_date" placeholder="Pickup date (YYYY-MM-DD)" required />
-              <input name="delivery_date" placeholder="Delivery date (YYYY-MM-DD)" required />
-              <input name="commodity" placeholder="Commodity" required />
+            <input name="pickup_date" placeholder="Pickup date (YYYY-MM-DD)" required />
+            <input name="delivery_date" placeholder="Delivery date (YYYY-MM-DD)" required />
+            <input name="commodity" placeholder="Commodity" required />
 
-              <input name="weight_lbs" type="number" placeholder="Weight (lbs)" required />
-              <input name="miles" type="number" placeholder="Miles" required />
-              <input name="rate_all_in" type="number" step="0.01" placeholder="All-in rate ($)" required />
+            <input name="weight_lbs" type="number" placeholder="Weight (lbs)" required />
+            <input name="miles" type="number" placeholder="Miles" required />
+            <input name="rate_all_in" type="number" step="0.01" placeholder="All-in rate ($)" required />
 
-              <select name="payment_terms" required>
-                <option value="" selected disabled>Payment terms</option>
-                <option value="NET 30">NET 30</option>
-                <option value="NET 15">NET 15</option>
-                <option value="NET 45">NET 45</option>
-                <option value="QuickPay">QuickPay</option>
-              </select>
+            <select name="payment_terms" required>
+              <option value="" selected disabled>Payment terms</option>
+              <option value="NET 30">NET 30</option>
+              <option value="NET 15">NET 15</option>
+              <option value="NET 45">NET 45</option>
+              <option value="QuickPay">QuickPay</option>
+            </select>
 
-              <select name="quickpay_available" required>
-                <option value="" selected disabled>QuickPay available?</option>
-                <option value="false">No</option>
-                <option value="true">Yes</option>
-              </select>
+            <select name="quickpay_available" required>
+              <option value="" selected disabled>QuickPay available?</option>
+              <option value="false">No</option>
+              <option value="true">Yes</option>
+            </select>
 
-              <input name="detention_rate_per_hr" type="number" step="0.01" placeholder="Detention $/hr" required />
-              <input name="detention_after_hours" type="number" placeholder="Detention after (hours)" required />
+            <input name="detention_rate_per_hr" type="number" step="0.01" placeholder="Detention $/hr" required />
+            <input name="detention_after_hours" type="number" placeholder="Detention after (hours)" required />
 
-              <select name="appointment_type" required>
-                <option value="" selected disabled>Appointment type</option>
-                <option value="FCFS">FCFS</option>
-                <option value="Appt Required">Appt Required</option>
-              </select>
+            <select name="appointment_type" required>
+              <option value="" selected disabled>Appointment type</option>
+              <option value="FCFS">FCFS</option>
+              <option value="Appt Required">Appt Required</option>
+            </select>
 
-              <input name="accessorials" placeholder="Accessorials (e.g., lumper, tarp)" required />
-              <input name="special_requirements" placeholder="Notes / requirements" required />
-            </div>
-            <div class="row" style="margin-top:12px">
-              <button class="btn green" type="submit">Post Load</button>
-              <a class="btn ghost" href="/loads">View Load Board</a>
-            </div>
-          </form>
-        ` : `
-          <div class="badge warn">Posting blocked: ${escapeHtml(gate.reason)}</div>
-        `}
+            <input name="accessorials" placeholder="Accessorials (e.g., lumper, tarp)" required />
+            <input name="special_requirements" placeholder="Notes / requirements" required />
+          </div>
+          <div class="row" style="margin-top:12px">
+            <button class="btn green" type="submit">Post Load</button>
+            <a class="btn ghost" href="/loads">View Load Board</a>
+          </div>
+        </form>
       </div>
 
       <div class="card">
@@ -1107,11 +1049,6 @@ app.get("/dashboard", requireAuth, async (req, res) => {
 /* ---------- Shipper post load ---------- */
 app.post("/shipper/loads", requireAuth, requireRole("SHIPPER"), async (req, res) => {
   try {
-    const billing = await getAndNormalizeBilling(req.user.id);
-    const gate = postingAllowed(billing);
-    if (!gate.ok) return res.status(403).send(`Posting blocked: ${escapeHtml(gate.reason)}`);
-
-    // required
     const lane_from = clampStr(req.body.lane_from, 120);
     const lane_to = clampStr(req.body.lane_to, 120);
     const pickup_date = clampStr(req.body.pickup_date, 30);
@@ -1119,12 +1056,10 @@ app.post("/shipper/loads", requireAuth, requireRole("SHIPPER"), async (req, res)
     const equipment = clampStr(req.body.equipment, 60);
     const commodity = clampStr(req.body.commodity, 90);
 
-    // numeric required
     const weight_lbs = int(req.body.weight_lbs);
     const miles = int(req.body.miles);
     const rate_all_in = Number(req.body.rate_all_in);
 
-    // other required
     const payment_terms = clampStr(req.body.payment_terms, 60);
     const quickpay_available = String(req.body.quickpay_available) === "true";
     const detention_rate_per_hr = Number(req.body.detention_rate_per_hr);
@@ -1153,10 +1088,6 @@ app.post("/shipper/loads", requireAuth, requireRole("SHIPPER"), async (req, res)
         appointment_type, accessorials, special_requirements
       ]
     );
-
-    if (billing.monthly_limit !== -1) {
-      await pool.query(`UPDATE shippers_billing SET loads_used = loads_used + 1, updated_at=NOW() WHERE shipper_id=$1`, [req.user.id]);
-    }
 
     res.redirect("/dashboard");
   } catch (e) {
@@ -1197,90 +1128,6 @@ app.post(
     res.redirect("/dashboard");
   }
 );
-
-/* ---------- Admin compliance ---------- */
-app.post("/admin/carriers/:id/approve", requireAuth, requireRole("ADMIN"), async (req, res) => {
-  const carrierId = Number(req.params.id);
-  await pool.query(`UPDATE carriers_compliance SET status='APPROVED', updated_at=NOW(), admin_note=NULL WHERE carrier_id=$1`, [carrierId]);
-  res.redirect("/dashboard");
-});
-app.post("/admin/carriers/:id/reject", requireAuth, requireRole("ADMIN"), async (req, res) => {
-  const carrierId = Number(req.params.id);
-  await pool.query(`UPDATE carriers_compliance SET status='REJECTED', admin_note='Rejected', updated_at=NOW() WHERE carrier_id=$1`, [carrierId]);
-  res.redirect("/dashboard");
-});
-
-/* ---------- Stripe webhook (kept, but not expanded here) ---------- */
-async function upsertBillingFromSubscription({ shipperId, customerId, subscriptionId, subStatus, priceId }) {
-  const plan = planFromPriceId(priceId);
-  const planDef = plan ? PLANS[plan] : null;
-  const mapped =
-    subStatus === "active" ? "ACTIVE" :
-    subStatus === "past_due" ? "PAST_DUE" :
-    subStatus === "canceled" ? "CANCELED" : "INACTIVE";
-  const limit = planDef ? planDef.limit : 0;
-
-  const nowMonth = monthKey();
-  const existing = await pool.query(`SELECT usage_month, loads_used FROM shippers_billing WHERE shipper_id=$1`, [shipperId]);
-  const prevMonth = existing.rows[0]?.usage_month || "";
-  const loadsUsed = existing.rows[0]?.loads_used ?? 0;
-
-  const newMonth = prevMonth && prevMonth === nowMonth ? prevMonth : nowMonth;
-  const newUsed = prevMonth && prevMonth === nowMonth ? loadsUsed : 0;
-
-  await pool.query(
-    `INSERT INTO shippers_billing
-      (shipper_id, stripe_customer_id, stripe_subscription_id, status, plan, monthly_limit, usage_month, loads_used, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
-     ON CONFLICT (shipper_id) DO UPDATE SET
-      stripe_customer_id=EXCLUDED.stripe_customer_id,
-      stripe_subscription_id=EXCLUDED.stripe_subscription_id,
-      status=EXCLUDED.status,
-      plan=EXCLUDED.plan,
-      monthly_limit=EXCLUDED.monthly_limit,
-      usage_month=EXCLUDED.usage_month,
-      loads_used=EXCLUDED.loads_used,
-      updated_at=NOW()`,
-    [shipperId, customerId || null, subscriptionId || null, mapped, plan, limit, newMonth, newUsed]
-  );
-}
-
-app.post("/stripe/webhook", async (req, res) => {
-  if (!stripeEnabled) return res.sendStatus(400);
-
-  let event;
-  try {
-    const sig = req.headers["stripe-signature"];
-    event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
-  } catch (err) {
-    return res.status(400).send(`Webhook Error: ${err.message}`);
-  }
-
-  try {
-    if (event.type === "checkout.session.completed") {
-      const session = event.data.object;
-      const shipperId = Number(session.metadata?.shipper_id);
-      const customerId = session.customer;
-      const subscriptionId = session.subscription;
-
-      if (shipperId && subscriptionId) {
-        const sub = await stripe.subscriptions.retrieve(subscriptionId);
-        const priceId = sub.items?.data?.[0]?.price?.id;
-        await upsertBillingFromSubscription({
-          shipperId,
-          customerId,
-          subscriptionId,
-          subStatus: sub.status,
-          priceId,
-        });
-      }
-    }
-    res.json({ received: true });
-  } catch (e) {
-    console.error("Webhook failed:", e);
-    res.sendStatus(500);
-  }
-});
 
 /* ---------- Load Board: JSON API + UI fetch ---------- */
 function buildLoadsQuery(filters) {
@@ -1555,7 +1402,6 @@ app.get("/loads", async (req, res) => {
       quickpay: els("quickpay").value,
       sort: els("sort").value
     };
-    // if carrier default actionable and user never touched status, keep it
     if(!params.status && statusDefault) params.status = statusDefault;
 
     const url = "/api/loads?" + qs(params);
@@ -1588,12 +1434,83 @@ app.get("/loads", async (req, res) => {
     loadData();
   });
 
-  // load on page open
   loadData();
   </script>
   `;
 
   res.send(layout({ title: "Load Board", user, body, extraScript }));
+});
+
+/* ---------- Stripe webhook (kept minimal) ---------- */
+async function upsertBillingFromSubscription({ shipperId, customerId, subscriptionId, subStatus, priceId }) {
+  const plan = planFromPriceId(priceId);
+  const planDef = plan ? PLANS[plan] : null;
+  const mapped =
+    subStatus === "active" ? "ACTIVE" :
+    subStatus === "past_due" ? "PAST_DUE" :
+    subStatus === "canceled" ? "CANCELED" : "INACTIVE";
+  const limit = planDef ? planDef.limit : 0;
+
+  const nowMonth = monthKey();
+  const existing = await pool.query(`SELECT usage_month, loads_used FROM shippers_billing WHERE shipper_id=$1`, [shipperId]);
+  const prevMonth = existing.rows[0]?.usage_month || "";
+  const loadsUsed = existing.rows[0]?.loads_used ?? 0;
+
+  const newMonth = prevMonth && prevMonth === nowMonth ? prevMonth : nowMonth;
+  const newUsed = prevMonth && prevMonth === nowMonth ? loadsUsed : 0;
+
+  await pool.query(
+    `INSERT INTO shippers_billing
+      (shipper_id, stripe_customer_id, stripe_subscription_id, status, plan, monthly_limit, usage_month, loads_used, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
+     ON CONFLICT (shipper_id) DO UPDATE SET
+      stripe_customer_id=EXCLUDED.stripe_customer_id,
+      stripe_subscription_id=EXCLUDED.stripe_subscription_id,
+      status=EXCLUDED.status,
+      plan=EXCLUDED.plan,
+      monthly_limit=EXCLUDED.monthly_limit,
+      usage_month=EXCLUDED.usage_month,
+      loads_used=EXCLUDED.loads_used,
+      updated_at=NOW()`,
+    [shipperId, customerId || null, subscriptionId || null, mapped, plan, limit, newMonth, newUsed]
+  );
+}
+
+app.post("/stripe/webhook", async (req, res) => {
+  if (!stripeEnabled) return res.sendStatus(400);
+
+  let event;
+  try {
+    const sig = req.headers["stripe-signature"];
+    event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
+  } catch (err) {
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  try {
+    if (event.type === "checkout.session.completed") {
+      const session = event.data.object;
+      const shipperId = Number(session.metadata?.shipper_id);
+      const customerId = session.customer;
+      const subscriptionId = session.subscription;
+
+      if (shipperId && subscriptionId) {
+        const sub = await stripe.subscriptions.retrieve(subscriptionId);
+        const priceId = sub.items?.data?.[0]?.price?.id;
+        await upsertBillingFromSubscription({
+          shipperId,
+          customerId,
+          subscriptionId,
+          subStatus: sub.status,
+          priceId,
+        });
+      }
+    }
+    res.json({ received: true });
+  } catch (e) {
+    console.error("Webhook failed:", e);
+    res.sendStatus(500);
+  }
 });
 
 /* ---------- Start ---------- */
