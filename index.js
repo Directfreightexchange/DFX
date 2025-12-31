@@ -3,6 +3,7 @@ const express = require("express");
 const bcrypt = require("bcryptjs");
 const cookieParser = require("cookie-parser");
 const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
 const { Pool } = require("pg");
 const multer = require("multer");
 const Stripe = require("stripe");
@@ -21,13 +22,18 @@ app.use(cookieParser());
 
 const PORT = process.env.PORT || 3000;
 
+// Change this whenever you paste a new file so you can confirm deploy instantly.
+const BUILD_VERSION = process.env.BUILD_VERSION || "2025-12-31-loadboard-v2";
+
 const DATABASE_URL = process.env.DATABASE_URL;
 const JWT_SECRET = process.env.JWT_SECRET;
 
 const APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;
+const DEBUG_LOADS = String(process.env.DEBUG_LOADS || "") === "1";
+
+// Stripe
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
-
 const STRIPE_PRICE_STARTER = process.env.STRIPE_PRICE_STARTER;
 const STRIPE_PRICE_GROWTH = process.env.STRIPE_PRICE_GROWTH;
 const STRIPE_PRICE_ENTERPRISE = process.env.STRIPE_PRICE_ENTERPRISE;
@@ -51,7 +57,9 @@ function escapeHtml(s) {
 }
 
 function bootFail(msg) {
-  app.get("*", (_, res) => res.status(500).send(`<h1>Config error</h1><p>${escapeHtml(msg)}</p>`));
+  app.get("*", (_, res) =>
+    res.status(500).send(`<h1>Config error</h1><p>${escapeHtml(msg)}</p><p>Build: ${escapeHtml(BUILD_VERSION)}</p>`)
+  );
   app.listen(PORT, "0.0.0.0", () => console.log("Booted with config error page:", msg));
 }
 
@@ -144,6 +152,15 @@ function clampStr(s, max = 180) {
   if (s.length > max) return s.slice(0, max);
   return s;
 }
+function safeLower(s) {
+  return String(s || "").trim().toLowerCase();
+}
+function sha256hex(s) {
+  return crypto.createHash("sha256").update(String(s)).digest("hex");
+}
+function randomToken(bytes = 24) {
+  return crypto.randomBytes(bytes).toString("hex");
+}
 
 /* ---------------- Auth helpers ---------------- */
 function signIn(res, user) {
@@ -204,9 +221,8 @@ async function sendEmail(to, subject, html) {
 const DISCLAIMER_TEXT =
   "Direct Freight Exchange is a technology platform and is not a broker or carrier. Users are responsible for verifying compliance, insurance, and payment terms.";
 
-function layout({ title, user, body }) {
+function layout({ title, user, body, extraHead = "", extraScript = "" }) {
   const yearLine = `© 2026 Direct Freight Exchange. All rights reserved.`;
-
   const footer = `
     <div class="footer">
       <div class="footerTop">
@@ -221,17 +237,16 @@ function layout({ title, user, body }) {
           <a href="/terms">Terms</a>
           <a href="/privacy">Privacy</a>
           <a href="/health">Status</a>
+          <a href="/version">Version</a>
         </div>
       </div>
       <div class="footDisclaimer">${escapeHtml(DISCLAIMER_TEXT)}</div>
-      <div class="footLegal">${escapeHtml(yearLine)}</div>
+      <div class="footLegal">${escapeHtml(yearLine)} • Build: <span class="mono">${escapeHtml(BUILD_VERSION)}</span></div>
     </div>
   `;
 
   const helpButton = `
-    <a class="helpFab" href="mailto:support@dfx-usa.com?subject=DFX%20Support" title="Help">
-      Help
-    </a>
+    <a class="helpFab" href="mailto:support@dfx-usa.com?subject=DFX%20Support" title="Help">Help</a>
   `;
 
   return `<!doctype html>
@@ -240,6 +255,7 @@ function layout({ title, user, body }) {
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>${escapeHtml(title)}</title>
+${extraHead}
 <style>
 :root{
   --bg:#050607;
@@ -247,10 +263,8 @@ function layout({ title, user, body }) {
   --line2:rgba(255,255,255,.08);
   --text:#eef7f1;
   --muted:rgba(238,247,241,.68);
-
   --green:#22c55e;
   --lime:#a3e635;
-
   --shadow:0 18px 60px rgba(0,0,0,.52);
   --radius:18px;
 }
@@ -264,8 +278,9 @@ body{
     linear-gradient(180deg, rgba(34,197,94,.08), transparent 45%),
     var(--bg);
 }
-.wrap{max-width:1400px;margin:0 auto;padding:22px}
+.wrap{max-width:1500px;margin:0 auto;padding:22px}
 a{color:var(--lime);text-decoration:none} a:hover{text-decoration:underline}
+.mono{font-variant-numeric: tabular-nums;}
 
 .nav{
   display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:center;
@@ -324,11 +339,8 @@ a{color:var(--lime);text-decoration:none} a:hover{text-decoration:underline}
 .title{font-size:44px;line-height:1.03;margin:0 0 10px 0;letter-spacing:-.5px}
 .muted{color:var(--muted)}
 .hr{height:1px;background:rgba(255,255,255,.10);margin:14px 0;border:0}
-
-.grid{display:grid;gap:16px;grid-template-columns:1.1fr .9fr;margin-top:16px}
-@media(max-width:980px){.grid{grid-template-columns:1fr}.nav{position:static}.title{font-size:38px}}
-
 .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+
 input,select,textarea{
   width:100%;
   min-width: 0;
@@ -383,7 +395,7 @@ input:focus,select:focus,textarea:focus{border-color:rgba(34,197,94,.55)}
 .helpFab:hover{filter:brightness(1.08);text-decoration:none}
 
 /* Load board */
-.boardGrid{display:grid;grid-template-columns: 380px 1fr;gap:16px;margin-top:16px}
+.boardGrid{display:grid;grid-template-columns: 420px 1fr;gap:16px;margin-top:16px}
 @media(max-width:980px){.boardGrid{grid-template-columns:1fr}}
 .filterCard{position:sticky;top:96px;align-self:start}
 @media(max-width:980px){.filterCard{position:static}}
@@ -392,12 +404,21 @@ input:focus,select:focus,textarea:focus{border-color:rgba(34,197,94,.55)}
 .threeCol{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
 @media(max-width:980px){.twoCol,.threeCol{grid-template-columns:1fr 1fr}}
 @media(max-width:540px){.twoCol,.threeCol{grid-template-columns:1fr}}
-table{width:100%;border-collapse:collapse}
-th,td{padding:10px;border-bottom:1px solid rgba(255,255,255,.07);text-align:left}
-th{color:rgba(238,247,241,.75);font-size:12px;font-weight:800;letter-spacing:.3px;text-transform:uppercase}
-td{vertical-align:top}
-.mono{font-variant-numeric: tabular-nums;}
-.cellStrong{font-weight:900}
+
+.loadList{display:grid;gap:12px;margin-top:14px}
+.loadCard{
+  border:1px solid rgba(255,255,255,.08);
+  background:rgba(6,8,9,.62);
+  border-radius:16px;
+  padding:14px;
+}
+.loadTop{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.lane{font-weight:1000;font-size:16px}
+.kv{display:grid;grid-template-columns: 180px 1fr;gap:6px;margin-top:10px}
+@media(max-width:720px){.kv{grid-template-columns: 1fr}}
+.k{color:var(--muted)}
+.v{color:rgba(238,247,241,.92)}
+.chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
 .chip{
   display:inline-flex;align-items:center;gap:8px;
   padding:6px 10px;border-radius:999px;border:1px solid rgba(255,255,255,.10);
@@ -430,11 +451,26 @@ td{vertical-align:top}
 </div>
 
 ${helpButton}
+${extraScript}
 </body>
 </html>`;
 }
 
 /* ---------- DB ---------- */
+async function ensureColumn(table, column, sqlType) {
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='${table}' AND column_name='${column}'
+      ) THEN
+        EXECUTE 'ALTER TABLE ${table} ADD COLUMN ${column} ${sqlType}';
+      END IF;
+    END$$;
+  `);
+}
+
 async function initDb() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
@@ -471,31 +507,24 @@ async function initDb() {
     CREATE TABLE IF NOT EXISTS loads (
       id SERIAL PRIMARY KEY,
       shipper_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-
       lane_from TEXT NOT NULL,
       lane_to TEXT NOT NULL,
       pickup_date TEXT NOT NULL,
       delivery_date TEXT NOT NULL,
-
       equipment TEXT NOT NULL,
       weight_lbs INTEGER NOT NULL,
       commodity TEXT NOT NULL,
       miles INTEGER NOT NULL,
-
       rate_all_in NUMERIC NOT NULL,
       payment_terms TEXT NOT NULL,
       quickpay_available BOOLEAN NOT NULL DEFAULT false,
-
-      detention_rate_per_hr NUMERIC NOT NULL,
-      detention_after_hours INTEGER NOT NULL,
-
-      appointment_type TEXT NOT NULL,
-      accessorials TEXT NOT NULL,
-      special_requirements TEXT NOT NULL,
-
+      detention_rate_per_hr NUMERIC NOT NULL DEFAULT 0,
+      detention_after_hours INTEGER NOT NULL DEFAULT 0,
+      appointment_type TEXT NOT NULL DEFAULT 'FCFS',
+      accessorials TEXT NOT NULL DEFAULT '',
+      special_requirements TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT 'OPEN' CHECK (status IN ('OPEN','REQUESTED','BOOKED')),
       booked_carrier_id INTEGER REFERENCES users(id),
-
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
 
@@ -507,7 +536,23 @@ async function initDb() {
       created_at TIMESTAMPTZ DEFAULT NOW(),
       UNIQUE(load_id, carrier_id)
     );
+
+    CREATE TABLE IF NOT EXISTS password_resets (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token_hash TEXT NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      used_at TIMESTAMPTZ
+    );
   `);
+
+  // migrations for older dbs
+  await ensureColumn("loads", "status", "TEXT NOT NULL DEFAULT 'OPEN'");
+  await ensureColumn("loads", "appointment_type", "TEXT NOT NULL DEFAULT 'FCFS'");
+  await ensureColumn("loads", "accessorials", "TEXT NOT NULL DEFAULT ''");
+  await ensureColumn("loads", "special_requirements", "TEXT NOT NULL DEFAULT ''");
+  await ensureColumn("loads", "detention_rate_per_hr", "NUMERIC NOT NULL DEFAULT 0");
+  await ensureColumn("loads", "detention_after_hours", "INTEGER NOT NULL DEFAULT 0");
 
   if (BOOTSTRAP_ADMIN_EMAIL) {
     const r = await pool.query(`SELECT id,email,role FROM users WHERE lower(email)=lower($1)`, [BOOTSTRAP_ADMIN_EMAIL]);
@@ -518,252 +563,82 @@ async function initDb() {
   }
 }
 
-/* ---------- Stripe billing helpers ---------- */
-async function upsertBillingFromSubscription({ shipperId, customerId, subscriptionId, subStatus, priceId }) {
-  const plan = planFromPriceId(priceId);
-  const planDef = plan ? PLANS[plan] : null;
-  const mapped =
-    subStatus === "active" ? "ACTIVE" :
-    subStatus === "past_due" ? "PAST_DUE" :
-    subStatus === "canceled" ? "CANCELED" : "INACTIVE";
-
-  const limit = planDef ? planDef.limit : 0;
-
-  const nowMonth = monthKey();
-  const existing = await pool.query(`SELECT usage_month, loads_used FROM shippers_billing WHERE shipper_id=$1`, [shipperId]);
-  const prevMonth = existing.rows[0]?.usage_month || "";
-  const loadsUsed = existing.rows[0]?.loads_used ?? 0;
-
-  const newMonth = prevMonth && prevMonth === nowMonth ? prevMonth : nowMonth;
-  const newUsed = prevMonth && prevMonth === nowMonth ? loadsUsed : 0;
-
-  await pool.query(
-    `INSERT INTO shippers_billing
-      (shipper_id, stripe_customer_id, stripe_subscription_id, status, plan, monthly_limit, usage_month, loads_used, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
-     ON CONFLICT (shipper_id) DO UPDATE SET
-      stripe_customer_id=EXCLUDED.stripe_customer_id,
-      stripe_subscription_id=EXCLUDED.stripe_subscription_id,
-      status=EXCLUDED.status,
-      plan=EXCLUDED.plan,
-      monthly_limit=EXCLUDED.monthly_limit,
-      usage_month=EXCLUDED.usage_month,
-      loads_used=EXCLUDED.loads_used,
-      updated_at=NOW()`,
-    [shipperId, customerId || null, subscriptionId || null, mapped, plan, limit, newMonth, newUsed]
-  );
-}
+/* ---------- Version / Health ---------- */
+app.get("/version", (req, res) => res.json({ build: BUILD_VERSION, stripeEnabled, smtpEnabled: !!getMailer() }));
+app.get("/health", (_, res) => res.json({ ok: true, build: BUILD_VERSION, stripeEnabled, smtpEnabled: !!getMailer() }));
 
 /* ---------- Legal ---------- */
 app.get("/terms", (req, res) => {
   const user = getUser(req);
-  const body = `
-    <div class="card">
-      <h2 style="margin-top:0">Terms</h2>
-      <div class="hr"></div>
-      <div class="muted" style="line-height:1.55">
-        <p><b>Platform Disclaimer</b></p>
-        <p>${escapeHtml(DISCLAIMER_TEXT)}</p>
+  res.send(layout({
+    title: "Terms",
+    user,
+    body: `
+      <div class="card">
+        <h2 style="margin-top:0">Terms</h2>
+        <div class="hr"></div>
+        <div class="muted" style="line-height:1.55">
+          <p><b>Platform Disclaimer</b></p>
+          <p>${escapeHtml(DISCLAIMER_TEXT)}</p>
+        </div>
       </div>
-    </div>
-  `;
-  res.send(layout({ title: "Terms", user, body }));
+    `
+  }));
 });
-
 app.get("/privacy", (req, res) => {
   const user = getUser(req);
-  const body = `
-    <div class="card">
-      <h2 style="margin-top:0">Privacy Policy</h2>
-      <div class="hr"></div>
-      <div class="muted" style="line-height:1.55">
-        <p><b>What we collect</b></p>
-        <ul>
-          <li>Account info: email, password hash, role</li>
-          <li>Marketplace activity: loads, requests, booking actions</li>
-          <li>Carrier compliance metadata: filenames + status</li>
-        </ul>
-        <p><b>Sharing</b></p>
-        <p>We do not sell personal information. Information is shared only as needed to operate the platform (e.g., Stripe for billing).</p>
-        <p><b>Contact</b></p>
-        <p>Email: <a href="mailto:support@dfx-usa.com">support@dfx-usa.com</a></p>
-      </div>
-    </div>
-  `;
-  res.send(layout({ title: "Privacy", user, body }));
-});
-
-/* ---------- Stripe routes ---------- */
-app.get("/shipper/plans", requireAuth, requireRole("SHIPPER"), async (req, res) => {
-  const user = req.user;
-  const bill = await pool.query(`SELECT * FROM shippers_billing WHERE shipper_id=$1`, [user.id]);
-  const b = bill.rows[0] || null;
-
-  const nowMonth = monthKey();
-  const usageMonth = b?.usage_month || nowMonth;
-  const used = b?.loads_used ?? 0;
-  const limit = b?.monthly_limit ?? 0;
-  const plan = b?.plan || null;
-  const status = b?.status || "INACTIVE";
-
-  const usageText = (limit === -1) ? `Unlimited` : `${used} / ${limit} used this month`;
-
-  const body = `
-    <div class="card">
-      <h2 style="margin-top:0">Shipper Plans</h2>
-      <div class="muted">Immediate upgrades (prorated). Posting requires an ACTIVE subscription.</div>
-      <div class="hr"></div>
-      <div class="row">
-        <span class="badge ${status === "ACTIVE" ? "ok" : "warn"}">Status: ${escapeHtml(status)}</span>
-        <span class="badge">Plan: ${escapeHtml(plan || "None")}</span>
-        <span class="badge">Month: ${escapeHtml(usageMonth)}</span>
-        <span class="badge brand">${escapeHtml(usageText)}</span>
-      </div>
-
-      ${!stripeEnabled ? `
+  res.send(layout({
+    title: "Privacy",
+    user,
+    body: `
+      <div class="card">
+        <h2 style="margin-top:0">Privacy Policy</h2>
         <div class="hr"></div>
-        <div class="badge warn">Stripe not configured (add STRIPE_* env vars in Render).</div>
-      ` : `
-        <div class="hr"></div>
-        <div class="grid">
-          ${Object.keys(PLANS).map(p => {
-            const pd = PLANS[p];
-            const isCurrent = plan === p && status === "ACTIVE";
-            const capText = pd.limit === -1 ? "Unlimited loads" : `${pd.limit} loads / month`;
-            return `
-              <div class="card" style="margin-top:0">
-                <div class="row" style="justify-content:space-between">
-                  <div>
-                    <div style="font-weight:1000;font-size:18px">${escapeHtml(pd.label)}</div>
-                    <div class="muted">${capText}</div>
-                  </div>
-                  <div style="font-weight:1000;font-size:18px">$${pd.price}/mo</div>
-                </div>
-                <div class="hr"></div>
-                ${isCurrent
-                  ? `<span class="badge ok">Current plan</span>`
-                  : `
-                    <form method="POST" action="/shipper/plan">
-                      <input type="hidden" name="plan" value="${p}">
-                      <button class="btn green" type="submit">${status === "ACTIVE" ? "Switch immediately" : "Subscribe"}</button>
-                    </form>
-                  `}
-              </div>
-            `;
-          }).join("")}
+        <div class="muted" style="line-height:1.55">
+          <p><b>What we collect</b></p>
+          <ul>
+            <li>Account info: email, password hash, role</li>
+            <li>Marketplace activity: loads and booking requests</li>
+            <li>Carrier verification metadata: filenames + status</li>
+          </ul>
+          <p><b>Sharing</b></p>
+          <p>We do not sell personal information. We share only with service providers necessary to run the platform (e.g., Stripe for billing).</p>
+          <p><b>Contact</b></p>
+          <p>Email: <a href="mailto:support@dfx-usa.com">support@dfx-usa.com</a></p>
         </div>
-      `}
-    </div>
-  `;
-  res.send(layout({ title: "Plans", user, body }));
+      </div>
+    `
+  }));
 });
 
-app.post("/shipper/plan", requireAuth, requireRole("SHIPPER"), async (req, res) => {
-  if (!stripeEnabled) return res.status(400).send("Stripe not configured.");
-
-  const plan = String(req.body.plan || "").toUpperCase();
-  if (!PLANS[plan]) return res.status(400).send("Invalid plan.");
-  const targetPriceId = priceIdForPlan(plan);
-
-  const bill = await pool.query(`SELECT * FROM shippers_billing WHERE shipper_id=$1`, [req.user.id]);
-  const b = bill.rows[0];
-
-  if (!b?.stripe_subscription_id || b.status !== "ACTIVE") {
-    const session = await stripe.checkout.sessions.create({
-      mode: "subscription",
-      line_items: [{ price: targetPriceId, quantity: 1 }],
-      success_url: `${APP_URL}/dashboard?sub=success`,
-      cancel_url: `${APP_URL}/shipper/plans?sub=cancel`,
-      customer_email: req.user.email,
-      metadata: { shipper_id: String(req.user.id) },
-    });
-    return res.redirect(303, session.url);
-  }
-
-  const sub = await stripe.subscriptions.retrieve(b.stripe_subscription_id);
-  const item = sub.items?.data?.[0];
-  if (!item) return res.status(400).send("Subscription item not found.");
-
-  await stripe.subscriptions.update(b.stripe_subscription_id, {
-    items: [{ id: item.id, price: targetPriceId }],
-    proration_behavior: "create_prorations",
-  });
-
-  const planDef = PLANS[plan];
-  await pool.query(
-    `UPDATE shippers_billing SET plan=$1, monthly_limit=$2, updated_at=NOW() WHERE shipper_id=$3`,
-    [plan, planDef.limit, req.user.id]
-  );
-
-  res.redirect("/shipper/plans?switched=1");
-});
-
-app.post("/stripe/webhook", async (req, res) => {
-  if (!stripeEnabled) return res.sendStatus(400);
-
-  let event;
-  try {
-    const sig = req.headers["stripe-signature"];
-    event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
-  } catch (err) {
-    return res.status(400).send(`Webhook Error: ${err.message}`);
-  }
-
-  try {
-    if (event.type === "checkout.session.completed") {
-      const session = event.data.object;
-      const shipperId = Number(session.metadata?.shipper_id);
-      const customerId = session.customer;
-      const subscriptionId = session.subscription;
-
-      if (shipperId && subscriptionId) {
-        const sub = await stripe.subscriptions.retrieve(subscriptionId);
-        const priceId = sub.items?.data?.[0]?.price?.id;
-        await upsertBillingFromSubscription({
-          shipperId,
-          customerId,
-          subscriptionId,
-          subStatus: sub.status,
-          priceId,
-        });
-      }
-    }
-
-    if (
-      event.type === "customer.subscription.created" ||
-      event.type === "customer.subscription.updated" ||
-      event.type === "customer.subscription.deleted"
-    ) {
-      const sub = event.data.object;
-      const subscriptionId = sub.id;
-      const customerId = sub.customer;
-      const priceId = sub.items?.data?.[0]?.price?.id;
-
-      const row = await pool.query(
-        `SELECT shipper_id FROM shippers_billing WHERE stripe_subscription_id=$1`,
-        [subscriptionId]
-      );
-      const shipperId =
-        row.rows[0]?.shipper_id ||
-        (await pool.query(`SELECT shipper_id FROM shippers_billing WHERE stripe_customer_id=$1`, [customerId])).rows[0]
-          ?.shipper_id;
-
-      if (shipperId) {
-        await upsertBillingFromSubscription({
-          shipperId,
-          customerId,
-          subscriptionId,
-          subStatus: sub.status,
-          priceId,
-        });
-      }
-    }
-
-    res.json({ received: true });
-  } catch (e) {
-    console.error("Webhook handler failed:", e);
-    res.sendStatus(500);
-  }
+/* ---------- Home ---------- */
+app.get("/", (req, res) => {
+  const user = getUser(req);
+  res.send(layout({
+    title: "DFX",
+    user,
+    body: `
+      <div class="hero">
+        <div class="heroInner">
+          <div class="row">
+            <span class="badge brand">All-In Pricing</span>
+            <span class="badge brand">Carrier Verified</span>
+            <span class="badge brand">Direct Booking</span>
+          </div>
+          <h2 class="title" style="margin-top:12px">Direct shipper ↔ carrier marketplace</h2>
+          <div class="muted" style="max-width:980px">
+            Transparent loads: rate, payment terms, detention, accessorials, appointment type, and requirements — all visible up front.
+          </div>
+          <div class="hr"></div>
+          <div class="row">
+            <a class="btn green" href="${user ? "/dashboard" : "/signup"}">${user ? "Go to Dashboard" : "Create account"}</a>
+            <a class="btn ghost" href="/loads">Browse Load Board</a>
+            <a class="btn ghost" href="/privacy">Privacy</a>
+          </div>
+        </div>
+      </div>
+    `
+  }));
 });
 
 /* ---------- Auth ---------- */
@@ -772,34 +647,36 @@ app.get("/signup", (req, res) => {
   res.send(layout({
     title: "Sign up",
     user,
-    body: `<div class="card">
-      <h2 style="margin-top:0">Sign up</h2>
-      <div class="muted">Carriers are free. Shippers subscribe to post loads.</div>
-      <div class="hr"></div>
-      <form method="POST" action="/signup">
-        <div class="twoCol">
-          <input name="email" type="email" placeholder="Email" required />
-          <input name="password" type="password" placeholder="Password (min 8 chars)" minlength="8" required />
-        </div>
-        <div class="twoCol" style="margin-top:10px">
-          <select name="role" required>
-            <option value="SHIPPER">Shipper</option>
-            <option value="CARRIER">Carrier (free)</option>
-          </select>
-          <button class="btn green" type="submit">Create account</button>
-        </div>
-        <div class="row" style="margin-top:10px">
-          <a class="btn ghost" href="/login">Login</a>
-          <a class="btn ghost" href="/loads">Load Board</a>
-        </div>
-      </form>
-    </div>`
+    body: `
+      <div class="card">
+        <h2 style="margin-top:0">Sign up</h2>
+        <div class="muted">Carriers are free. Shippers subscribe to post loads.</div>
+        <div class="hr"></div>
+        <form method="POST" action="/signup">
+          <div class="twoCol">
+            <input name="email" type="email" placeholder="Email" required />
+            <input name="password" type="password" placeholder="Password (min 8 chars)" minlength="8" required />
+          </div>
+          <div class="twoCol" style="margin-top:10px">
+            <select name="role" required>
+              <option value="SHIPPER">Shipper</option>
+              <option value="CARRIER">Carrier (free)</option>
+            </select>
+            <button class="btn green" type="submit">Create account</button>
+          </div>
+          <div class="row" style="margin-top:10px">
+            <a class="btn ghost" href="/login">Login</a>
+            <a class="btn ghost" href="/loads">Load Board</a>
+          </div>
+        </form>
+      </div>
+    `
   }));
 });
 
 app.post("/signup", async (req, res) => {
   try {
-    const email = String(req.body.email || "").trim().toLowerCase();
+    const email = safeLower(req.body.email);
     const password = String(req.body.password || "");
     const role = String(req.body.role || "SHIPPER").toUpperCase();
 
@@ -843,26 +720,29 @@ app.get("/login", (req, res) => {
   res.send(layout({
     title: "Login",
     user,
-    body: `<div class="card">
-      <h2 style="margin-top:0">Login</h2>
-      <form method="POST" action="/login">
-        <div class="twoCol">
-          <input name="email" type="email" placeholder="Email" required />
-          <input name="password" type="password" placeholder="Password" required />
-        </div>
-        <div class="row" style="margin-top:10px">
-          <button class="btn green" type="submit">Login</button>
-          <a class="btn ghost" href="/signup">Create</a>
-          <a class="btn ghost" href="/loads">Load Board</a>
-        </div>
-      </form>
-    </div>`
+    body: `
+      <div class="card">
+        <h2 style="margin-top:0">Login</h2>
+        <form method="POST" action="/login">
+          <div class="twoCol">
+            <input name="email" type="email" placeholder="Email" required />
+            <input name="password" type="password" placeholder="Password" required />
+          </div>
+          <div class="row" style="margin-top:10px">
+            <button class="btn green" type="submit">Login</button>
+            <a class="btn ghost" href="/signup">Create</a>
+            <a class="btn ghost" href="/forgot">Forgot password?</a>
+            <a class="btn ghost" href="/loads">Load Board</a>
+          </div>
+        </form>
+      </div>
+    `
   }));
 });
 
 app.post("/login", async (req, res) => {
   try {
-    const email = String(req.body.email || "").trim().toLowerCase();
+    const email = safeLower(req.body.email);
     const password = String(req.body.password || "");
     const r = await pool.query("SELECT id,email,password_hash,role FROM users WHERE email=$1", [email]);
     const u = r.rows[0];
@@ -879,35 +759,116 @@ app.post("/login", async (req, res) => {
 
 app.get("/logout", (req, res) => { res.clearCookie("dfx_token"); res.redirect("/"); });
 
-/* ---------- Home ---------- */
-app.get("/", (req, res) => {
+/* ---------- Forgot password ---------- */
+app.get("/forgot", (req, res) => {
   const user = getUser(req);
-  const body = `
-    <div class="hero">
-      <div class="heroInner">
-        <div class="row">
-          <span class="badge brand">All-In Pricing</span>
-          <span class="badge brand">Carrier Verified</span>
-          <span class="badge brand">Direct Booking</span>
-        </div>
-
-        <h2 class="title" style="margin-top:12px">No hidden rates. No phone calls. No broker games.</h2>
-        <div class="muted" style="max-width:900px">
-          DFX connects shippers and carriers directly with fully transparent loads:
-          <b>all-in rate</b>, <b>payment terms</b>, <b>detention</b>, <b>accessorials</b>, appointment type, and notes —
-          visible up front so carriers can commit fast and shippers can book with confidence.
-        </div>
-
+  res.send(layout({
+    title: "Reset password",
+    user,
+    body: `
+      <div class="card">
+        <h2 style="margin-top:0">Reset password</h2>
+        <div class="muted">Enter your email. We’ll send a secure reset link.</div>
         <div class="hr"></div>
-        <div class="row">
-          <a class="btn green" href="${user ? "/dashboard" : "/signup"}">${user ? "Go to Dashboard" : "Create account"}</a>
-          <a class="btn ghost" href="/loads">Browse Load Board</a>
-          <a class="btn ghost" href="/terms">Terms</a>
-        </div>
+        <form method="POST" action="/forgot">
+          <div class="twoCol">
+            <input name="email" type="email" placeholder="Email" required />
+            <button class="btn green" type="submit">Send reset link</button>
+          </div>
+        </form>
       </div>
-    </div>
-  `;
-  res.send(layout({ title: "DFX", user, body }));
+    `
+  }));
+});
+
+app.post("/forgot", async (req, res) => {
+  const user = getUser(req);
+  const email = safeLower(req.body.email);
+
+  const r = await pool.query(`SELECT id,email FROM users WHERE email=$1`, [email]);
+  const u = r.rows[0];
+
+  // Don't reveal whether account exists.
+  if (!u) {
+    return res.send(layout({
+      title: "Check your email",
+      user,
+      body: `<div class="card"><h2 style="margin-top:0">Check your email</h2><div class="muted">If an account exists, a reset link was sent.</div></div>`
+    }));
+  }
+
+  const token = randomToken(24);
+  const tokenHash = sha256hex(token);
+  const expires = new Date(Date.now() + 1000 * 60 * 30);
+
+  await pool.query(`INSERT INTO password_resets (user_id, token_hash, expires_at) VALUES ($1,$2,$3)`, [
+    u.id, tokenHash, expires.toISOString()
+  ]);
+
+  const link = `${APP_URL}/reset?token=${encodeURIComponent(token)}&email=${encodeURIComponent(u.email)}`;
+  await sendEmail(u.email, "DFX Password Reset", `
+    <p>Use this link to set a new password (valid for 30 minutes):</p>
+    <p><a href="${escapeHtml(link)}">${escapeHtml(link)}</a></p>
+  `);
+
+  res.send(layout({
+    title: "Check your email",
+    user,
+    body: `<div class="card"><h2 style="margin-top:0">Check your email</h2><div class="muted">If an account exists, a reset link was sent.</div></div>`
+  }));
+});
+
+app.get("/reset", (req, res) => {
+  const user = getUser(req);
+  const token = String(req.query.token || "");
+  const email = safeLower(req.query.email);
+  res.send(layout({
+    title: "Set new password",
+    user,
+    body: `
+      <div class="card">
+        <h2 style="margin-top:0">Set a new password</h2>
+        <div class="hr"></div>
+        <form method="POST" action="/reset">
+          <input type="hidden" name="token" value="${escapeHtml(token)}"/>
+          <input type="hidden" name="email" value="${escapeHtml(email)}"/>
+          <div class="twoCol">
+            <input name="password" type="password" minlength="8" placeholder="New password (min 8 chars)" required />
+            <button class="btn green" type="submit">Update password</button>
+          </div>
+        </form>
+      </div>
+    `
+  }));
+});
+
+app.post("/reset", async (req, res) => {
+  const email = safeLower(req.body.email);
+  const token = String(req.body.token || "");
+  const password = String(req.body.password || "");
+  if (password.length < 8) return res.status(400).send("Password too short.");
+
+  const u = (await pool.query(`SELECT id,email,role FROM users WHERE email=$1`, [email])).rows[0];
+  if (!u) return res.status(400).send("Invalid reset link.");
+
+  const tokenHash = sha256hex(token);
+  const row = (await pool.query(
+    `SELECT id,expires_at,used_at FROM password_resets
+     WHERE user_id=$1 AND token_hash=$2
+     ORDER BY id DESC LIMIT 1`,
+    [u.id, tokenHash]
+  )).rows[0];
+
+  if (!row) return res.status(400).send("Invalid reset link.");
+  if (row.used_at) return res.status(400).send("Reset link already used.");
+  if (new Date(row.expires_at).getTime() < Date.now()) return res.status(400).send("Reset link expired.");
+
+  const hash = await bcrypt.hash(password, 12);
+  await pool.query(`UPDATE users SET password_hash=$1 WHERE id=$2`, [hash, u.id]);
+  await pool.query(`UPDATE password_resets SET used_at=NOW() WHERE id=$1`, [row.id]);
+
+  signIn(res, u);
+  res.redirect("/dashboard");
 });
 
 /* ---------- Billing gate + monthly usage ---------- */
@@ -922,7 +883,6 @@ async function getAndNormalizeBilling(shipperId) {
     );
     b = (await pool.query(`SELECT * FROM shippers_billing WHERE shipper_id=$1`, [shipperId])).rows[0];
   }
-
   const nowM = monthKey();
   if (b.usage_month !== nowM) {
     await pool.query(
@@ -932,7 +892,6 @@ async function getAndNormalizeBilling(shipperId) {
     b.usage_month = nowM;
     b.loads_used = 0;
   }
-
   return b;
 }
 function postingAllowed(billing) {
@@ -943,369 +902,270 @@ function postingAllowed(billing) {
   return { ok: true, reason: null };
 }
 
-/* ---------- Dashboards ---------- */
-function equipmentSelectOptions(selected) {
-  return EQUIPMENT_OPTIONS.map(e => `<option${selected === e ? " selected" : ""}>${escapeHtml(e)}</option>`).join("");
+/* ---------- Dashboard (shipper + carrier + admin) ---------- */
+function rpmForLoad(l) {
+  const miles = Number(l.miles);
+  const rate = Number(l.rate_all_in);
+  if (!Number.isFinite(miles) || miles <= 0) return 0;
+  if (!Number.isFinite(rate) || rate <= 0) return 0;
+  return rate / miles;
+}
+function equipmentOptionsHtml(selected) {
+  const opts = [`<option value="" ${!selected ? "selected" : ""} disabled>Select equipment</option>`]
+    .concat(EQUIPMENT_OPTIONS.map(e => `<option value="${escapeHtml(e)}"${selected === e ? " selected" : ""}>${escapeHtml(e)}</option>`));
+  return opts.join("");
 }
 
 app.get("/dashboard", requireAuth, async (req, res) => {
-  try {
-    const user = req.user;
+  const user = req.user;
 
-    if (user.role === "SHIPPER") {
-      const billing = await getAndNormalizeBilling(user.id);
-      const gate = postingAllowed(billing);
+  if (user.role === "SHIPPER") {
+    const billing = await getAndNormalizeBilling(user.id);
+    const gate = postingAllowed(billing);
 
-      const planLabel = billing.plan ? PLANS[billing.plan]?.label : "None";
-      const limitText =
-        billing.monthly_limit === -1 ? "Unlimited" :
-        `${billing.loads_used} / ${billing.monthly_limit} used this month`;
+    const planLabel = billing.plan ? PLANS[billing.plan]?.label : "None";
+    const limitText = billing.monthly_limit === -1 ? "Unlimited" : `${billing.loads_used} / ${billing.monthly_limit} used this month`;
 
-      const myLoads = await pool.query(`SELECT * FROM loads WHERE shipper_id=$1 ORDER BY created_at DESC`, [user.id]);
-
-      const requests = await pool.query(`
-        SELECT lr.id as request_id, lr.status as request_status, lr.created_at,
-               lr.carrier_id,
-               l.id as load_id, l.lane_from, l.lane_to,
-               u.email as carrier_email,
-               cc.status as carrier_compliance
-        FROM load_requests lr
-        JOIN loads l ON l.id = lr.load_id
-        JOIN users u ON u.id = lr.carrier_id
-        LEFT JOIN carriers_compliance cc ON cc.carrier_id = lr.carrier_id
-        WHERE l.shipper_id=$1
-        ORDER BY lr.created_at DESC
-      `, [user.id]);
-
-      const body = `
-        <div class="grid">
-          <div class="card">
-            <div class="row" style="justify-content:space-between">
-              <div>
-                <h2 style="margin:0">Shipper Dashboard</h2>
-                <div class="muted">Post transparent loads. Carriers request. You accept/decline.</div>
-              </div>
-              <span class="badge ${billing.status === "ACTIVE" ? "ok" : "warn"}">Billing: ${escapeHtml(billing.status)}</span>
-            </div>
-
-            <div class="hr"></div>
-
-            <div class="row">
-              <span class="badge">Plan: ${escapeHtml(planLabel)}</span>
-              <span class="badge brand">${escapeHtml(limitText)}</span>
-              <a class="btn green" href="/shipper/plans">Manage Plan</a>
-            </div>
-
-            <div class="hr"></div>
-
-            <h3 style="margin:0 0 10px 0">Post a load</h3>
-
-            ${gate.ok ? `
-            <form method="POST" action="/shipper/loads">
-              <div class="threeCol">
-                <input name="lane_from" placeholder="From (City, ST)" required />
-                <input name="lane_to" placeholder="To (City, ST)" required />
-                <select name="equipment" required>${equipmentSelectOptions("")}</select>
-
-                <input name="pickup_date" placeholder="Pickup date (YYYY-MM-DD)" required />
-                <input name="delivery_date" placeholder="Delivery date (YYYY-MM-DD)" required />
-                <input name="commodity" placeholder="Commodity" required />
-
-                <input name="weight_lbs" type="number" placeholder="Weight (lbs)" required />
-                <input name="miles" type="number" placeholder="Miles" required />
-                <input name="rate_all_in" type="number" step="0.01" placeholder="All-in rate ($)" required />
-
-                <select name="payment_terms" required>
-                  <option value="" selected disabled>Payment terms</option>
-                  <option value="NET 30">NET 30</option>
-                  <option value="NET 15">NET 15</option>
-                  <option value="NET 45">NET 45</option>
-                  <option value="QuickPay">QuickPay</option>
-                </select>
-
-                <select name="quickpay_available" required>
-                  <option value="" selected disabled>QuickPay available?</option>
-                  <option value="false">No</option>
-                  <option value="true">Yes</option>
-                </select>
-
-                <input name="detention_rate_per_hr" type="number" step="0.01" placeholder="Detention $/hr" required />
-                <input name="detention_after_hours" type="number" placeholder="Detention after (hours)" required />
-
-                <select name="appointment_type" required>
-                  <option value="" selected disabled>Appointment type</option>
-                  <option value="FCFS">FCFS</option>
-                  <option value="Appt Required">Appt Required</option>
-                </select>
-
-                <input name="accessorials" placeholder="Accessorials (e.g., tarp, lumper)" required />
-                <input name="special_requirements" placeholder="Notes / requirements" required />
-              </div>
-
-              <div class="row" style="margin-top:12px">
-                <button class="btn green" type="submit">Post Load</button>
-                <a class="btn ghost" href="/loads">View Load Board</a>
-              </div>
-            </form>
-            ` : `
-              <div class="badge warn">Posting blocked: ${escapeHtml(gate.reason)}</div>
-              <div class="row" style="margin-top:10px">
-                <a class="btn green" href="/shipper/plans">Upgrade / Subscribe</a>
-              </div>
-            `}
-          </div>
-
-          <div class="card">
-            <h3 style="margin-top:0">Booking Requests</h3>
-            <div class="muted">Carrier requests → you accept/decline → load becomes BOOKED.</div>
-            <div class="hr"></div>
-
-            ${requests.rows.length ? requests.rows.map(r => `
-              <div style="padding:14px;border-radius:16px;border:1px solid rgba(255,255,255,.08);background:rgba(6,8,9,.62);margin-top:12px">
-                <div class="row" style="justify-content:space-between">
-                  <div><b>Load #${r.load_id}</b> ${escapeHtml(r.lane_from)} → ${escapeHtml(r.lane_to)}</div>
-                  <span class="badge ${r.request_status === "REQUESTED" ? "warn" : r.request_status === "ACCEPTED" ? "ok" : ""}">${escapeHtml(r.request_status)}</span>
-                </div>
-                <div class="muted">Carrier: ${escapeHtml(r.carrier_email)} • Verification: ${escapeHtml(r.carrier_compliance || "PENDING")}</div>
-                ${r.request_status === "REQUESTED" ? `
-                  <div class="row" style="margin-top:10px">
-                    <form method="POST" action="/shipper/requests/${r.request_id}/accept"><button class="btn green" type="submit">Accept</button></form>
-                    <form method="POST" action="/shipper/requests/${r.request_id}/decline"><button class="btn ghost" type="submit">Decline</button></form>
-                  </div>` : ``}
-              </div>
-            `).join("") : `<div class="muted">No requests yet.</div>`}
-          </div>
-        </div>
-
-        <div class="card">
-          <h3 style="margin-top:0">Your Loads</h3>
-          <div class="hr"></div>
-          ${myLoads.rows.length ? myLoads.rows.map(l => loadCard(l)).join("") : `<div class="muted">No loads yet.</div>`}
-        </div>
-      `;
-      return res.send(layout({ title: "Dashboard", user, body }));
-    }
-
-    if (user.role === "CARRIER") {
-      const comp = await pool.query(`SELECT * FROM carriers_compliance WHERE carrier_id=$1`, [user.id]);
-      const c = comp.rows[0] || { status: "PENDING" };
-
-      const myReqs = await pool.query(`
-        SELECT lr.*, l.lane_from, l.lane_to, l.status as load_status
-        FROM load_requests lr
-        JOIN loads l ON l.id = lr.load_id
-        WHERE lr.carrier_id=$1
-        ORDER BY lr.created_at DESC
-      `, [user.id]);
-
-      const body = `
-        <div class="grid">
-          <div class="card">
-            <div class="row" style="justify-content:space-between">
-              <div>
-                <h2 style="margin:0">Carrier Dashboard</h2>
-                <div class="muted">Submit compliance docs to earn Verified badge.</div>
-              </div>
-              <span class="badge ${c.status === "APPROVED" ? "ok" : "warn"}">Verification: ${escapeHtml(c.status)}</span>
-            </div>
-
-            <div class="hr"></div>
-
-            <div class="muted" style="margin-bottom:10px">
-              Required documents:
-              <ul>
-                <li>W-9</li>
-                <li>Certificate of Insurance (Auto Liability + Cargo)</li>
-                <li>Operating Authority (MC / DOT proof)</li>
-              </ul>
-            </div>
-
-            <form method="POST" action="/carrier/compliance" enctype="multipart/form-data">
-              <div class="threeCol">
-                <input name="insurance_expires" placeholder="Insurance expires (YYYY-MM-DD)" value="${escapeHtml(c.insurance_expires || "")}" required />
-                <input type="file" name="w9" accept="application/pdf,image/*" required />
-                <input type="file" name="insurance" accept="application/pdf,image/*" required />
-                <input type="file" name="authority" accept="application/pdf,image/*" required />
-                <button class="btn green" type="submit">Submit for Verification</button>
-              </div>
-              <div class="small" style="margin-top:10px">Next upgrade: store docs in secure file storage.</div>
-            </form>
-
-            <div class="hr"></div>
-
-            <a class="btn green" href="/loads">Find Loads</a>
-          </div>
-
-          <div class="card">
-            <h3 style="margin-top:0">Your Requests</h3>
-            <div class="hr"></div>
-            ${myReqs.rows.length ? myReqs.rows.map(r => `
-              <div style="padding:14px;border-radius:16px;border:1px solid rgba(255,255,255,.08);background:rgba(6,8,9,.62);margin-top:12px">
-                <div class="row" style="justify-content:space-between">
-                  <div><b>Load #${r.load_id}</b> ${escapeHtml(r.lane_from)} → ${escapeHtml(r.lane_to)}</div>
-                  <span class="badge ${r.status === "REQUESTED" ? "warn" : r.status === "ACCEPTED" ? "ok" : ""}">${escapeHtml(r.status)}</span>
-                </div>
-                <div class="muted">Load status: ${escapeHtml(r.load_status)}</div>
-              </div>
-            `).join("") : `<div class="muted">No requests yet.</div>`}
-          </div>
-        </div>
-      `;
-      return res.send(layout({ title: "Carrier", user, body }));
-    }
-
-    // ADMIN
-    const pending = await pool.query(`
-      SELECT cc.*, u.email
-      FROM carriers_compliance cc
-      JOIN users u ON u.id = cc.carrier_id
-      WHERE cc.status='PENDING'
-      ORDER BY cc.updated_at DESC
-    `);
+    const myLoads = await pool.query(`SELECT * FROM loads WHERE shipper_id=$1 ORDER BY created_at DESC`, [user.id]);
 
     const body = `
       <div class="card">
-        <h2 style="margin-top:0">Admin — Carrier Verifications</h2>
-        <div class="muted">Approve carriers to enable Verified badge and load requests.</div>
+        <div class="row" style="justify-content:space-between">
+          <div>
+            <h2 style="margin:0">Shipper Dashboard</h2>
+            <div class="muted">Post loads and manage booking requests.</div>
+          </div>
+          <span class="badge ${billing.status === "ACTIVE" ? "ok" : "warn"}">Billing: ${escapeHtml(billing.status)}</span>
+        </div>
+
         <div class="hr"></div>
-        ${pending.rows.length ? pending.rows.map(p => `
-          <div style="padding:14px;border-radius:16px;border:1px solid rgba(255,255,255,.08);background:rgba(6,8,9,.62);margin-top:12px">
-            <div class="row" style="justify-content:space-between">
-              <div><b>${escapeHtml(p.email)}</b> • Insurance exp: ${escapeHtml(p.insurance_expires || "—")}</div>
-              <span class="badge warn">PENDING</span>
+
+        <div class="row">
+          <span class="badge">Plan: ${escapeHtml(planLabel)}</span>
+          <span class="badge brand">${escapeHtml(limitText)}</span>
+          <a class="btn green" href="/shipper/plans">Manage Plan</a>
+        </div>
+
+        <div class="hr"></div>
+
+        <h3 style="margin:0 0 10px 0">Post a load</h3>
+        ${gate.ok ? `
+          <form method="POST" action="/shipper/loads">
+            <div class="threeCol">
+              <input name="lane_from" placeholder="From (City, ST)" required />
+              <input name="lane_to" placeholder="To (City, ST)" required />
+              <select name="equipment" required>${equipmentOptionsHtml("")}</select>
+
+              <input name="pickup_date" placeholder="Pickup date (YYYY-MM-DD)" required />
+              <input name="delivery_date" placeholder="Delivery date (YYYY-MM-DD)" required />
+              <input name="commodity" placeholder="Commodity" required />
+
+              <input name="weight_lbs" type="number" placeholder="Weight (lbs)" required />
+              <input name="miles" type="number" placeholder="Miles" required />
+              <input name="rate_all_in" type="number" step="0.01" placeholder="All-in rate ($)" required />
+
+              <select name="payment_terms" required>
+                <option value="" selected disabled>Payment terms</option>
+                <option value="NET 30">NET 30</option>
+                <option value="NET 15">NET 15</option>
+                <option value="NET 45">NET 45</option>
+                <option value="QuickPay">QuickPay</option>
+              </select>
+
+              <select name="quickpay_available" required>
+                <option value="" selected disabled>QuickPay available?</option>
+                <option value="false">No</option>
+                <option value="true">Yes</option>
+              </select>
+
+              <input name="detention_rate_per_hr" type="number" step="0.01" placeholder="Detention $/hr" required />
+              <input name="detention_after_hours" type="number" placeholder="Detention after (hours)" required />
+
+              <select name="appointment_type" required>
+                <option value="" selected disabled>Appointment type</option>
+                <option value="FCFS">FCFS</option>
+                <option value="Appt Required">Appt Required</option>
+              </select>
+
+              <input name="accessorials" placeholder="Accessorials (e.g., lumper, tarp)" required />
+              <input name="special_requirements" placeholder="Notes / requirements" required />
             </div>
-            <div class="muted">Files: W-9 (${escapeHtml(p.w9_filename||"—")}), COI (${escapeHtml(p.insurance_filename||"—")}), Authority (${escapeHtml(p.authority_filename||"—")})</div>
-            <div class="row" style="margin-top:10px">
+            <div class="row" style="margin-top:12px">
+              <button class="btn green" type="submit">Post Load</button>
+              <a class="btn ghost" href="/loads">View Load Board</a>
+            </div>
+          </form>
+        ` : `
+          <div class="badge warn">Posting blocked: ${escapeHtml(gate.reason)}</div>
+        `}
+      </div>
+
+      <div class="card">
+        <h3 style="margin-top:0">Your Loads</h3>
+        <div class="hr"></div>
+        ${myLoads.rows.length ? myLoads.rows.map(l => `
+          <div class="loadCard">
+            <div class="loadTop">
+              <div>
+                <div class="lane">#${l.id} ${escapeHtml(l.lane_from)} → ${escapeHtml(l.lane_to)}</div>
+                <div class="muted">${escapeHtml(l.pickup_date)} → ${escapeHtml(l.delivery_date)}</div>
+              </div>
+              <div style="text-align:right">
+                <div style="font-weight:1000">${money(l.rate_all_in)}</div>
+                <div class="small mono">RPM: ${rpmForLoad(l) ? `$${rpmForLoad(l).toFixed(2)}` : "—"}</div>
+              </div>
+            </div>
+            <div class="chips">
+              <span class="chip">${escapeHtml(l.equipment)}</span>
+              <span class="chip mono">${int(l.miles).toLocaleString()} mi</span>
+              <span class="chip mono">${int(l.weight_lbs).toLocaleString()} lbs</span>
+              <span class="chip">${escapeHtml(l.status)}</span>
+              <span class="chip">${escapeHtml(l.commodity)}</span>
+            </div>
+          </div>
+        `).join("") : `<div class="muted">No loads posted yet.</div>`}
+      </div>
+    `;
+    return res.send(layout({ title: "Dashboard", user, body }));
+  }
+
+  if (user.role === "CARRIER") {
+    const comp = await pool.query(`SELECT * FROM carriers_compliance WHERE carrier_id=$1`, [user.id]);
+    const c = comp.rows[0] || { status: "PENDING" };
+
+    const body = `
+      <div class="card">
+        <div class="row" style="justify-content:space-between">
+          <div>
+            <h2 style="margin:0">Carrier Dashboard</h2>
+            <div class="muted">Submit verification docs to get Verified status.</div>
+          </div>
+          <span class="badge ${c.status === "APPROVED" ? "ok" : "warn"}">Verification: ${escapeHtml(c.status)}</span>
+        </div>
+
+        <div class="hr"></div>
+
+        <div class="muted">
+          Required documents:
+          <ul>
+            <li>W-9</li>
+            <li>Certificate of Insurance (Auto Liability + Cargo)</li>
+            <li>Operating Authority (MC / DOT proof)</li>
+          </ul>
+        </div>
+
+        <form method="POST" action="/carrier/compliance" enctype="multipart/form-data">
+          <div class="threeCol">
+            <input name="insurance_expires" placeholder="Insurance expires (YYYY-MM-DD)" value="${escapeHtml(c.insurance_expires || "")}" required />
+            <input type="file" name="w9" accept="application/pdf,image/*" required />
+            <input type="file" name="insurance" accept="application/pdf,image/*" required />
+            <input type="file" name="authority" accept="application/pdf,image/*" required />
+            <button class="btn green" type="submit">Submit for Verification</button>
+          </div>
+        </form>
+
+        <div class="hr"></div>
+        <a class="btn green" href="/loads">Find Loads</a>
+      </div>
+    `;
+    return res.send(layout({ title: "Carrier", user, body }));
+  }
+
+  // ADMIN
+  const pending = await pool.query(`
+    SELECT cc.*, u.email
+    FROM carriers_compliance cc
+    JOIN users u ON u.id = cc.carrier_id
+    WHERE cc.status='PENDING'
+    ORDER BY cc.updated_at DESC
+  `);
+
+  const body = `
+    <div class="card">
+      <h2 style="margin-top:0">Admin — Carrier Verifications</h2>
+      <div class="hr"></div>
+      ${pending.rows.length ? pending.rows.map(p => `
+        <div class="loadCard">
+          <div class="loadTop">
+            <div>
+              <div class="lane">${escapeHtml(p.email)}</div>
+              <div class="muted">Insurance exp: ${escapeHtml(p.insurance_expires || "—")}</div>
+              <div class="small">W-9: ${escapeHtml(p.w9_filename || "—")} • COI: ${escapeHtml(p.insurance_filename || "—")} • Authority: ${escapeHtml(p.authority_filename || "—")}</div>
+            </div>
+            <div class="row">
               <form method="POST" action="/admin/carriers/${p.carrier_id}/approve"><button class="btn green" type="submit">Approve</button></form>
               <form method="POST" action="/admin/carriers/${p.carrier_id}/reject"><button class="btn ghost" type="submit">Reject</button></form>
             </div>
           </div>
-        `).join("") : `<div class="muted">No pending carriers.</div>`}
-      </div>
-    `;
-    return res.send(layout({ title: "Admin", user, body }));
-  } catch (e) {
-    console.error("Dashboard error:", e);
-    return res.status(500).send("Dashboard error.");
-  }
+        </div>
+      `).join("") : `<div class="muted">No pending carriers.</div>`}
+    </div>
+  `;
+  return res.send(layout({ title: "Admin", user, body }));
 });
 
-/* ---------- Shipper actions ---------- */
+/* ---------- Shipper post load ---------- */
 app.post("/shipper/loads", requireAuth, requireRole("SHIPPER"), async (req, res) => {
-  const billing = await getAndNormalizeBilling(req.user.id);
-  const gate = postingAllowed(billing);
-  if (!gate.ok) return res.status(403).send(`Posting blocked: ${escapeHtml(gate.reason)}`);
+  try {
+    const billing = await getAndNormalizeBilling(req.user.id);
+    const gate = postingAllowed(billing);
+    if (!gate.ok) return res.status(403).send(`Posting blocked: ${escapeHtml(gate.reason)}`);
 
-  const lane_from = clampStr(req.body.lane_from, 120);
-  const lane_to = clampStr(req.body.lane_to, 120);
-  const pickup_date = clampStr(req.body.pickup_date, 30);
-  const delivery_date = clampStr(req.body.delivery_date, 30);
+    // required
+    const lane_from = clampStr(req.body.lane_from, 120);
+    const lane_to = clampStr(req.body.lane_to, 120);
+    const pickup_date = clampStr(req.body.pickup_date, 30);
+    const delivery_date = clampStr(req.body.delivery_date, 30);
+    const equipment = clampStr(req.body.equipment, 60);
+    const commodity = clampStr(req.body.commodity, 90);
 
-  const equipment = clampStr(req.body.equipment, 60);
-  const commodity = clampStr(req.body.commodity, 90);
+    // numeric required
+    const weight_lbs = int(req.body.weight_lbs);
+    const miles = int(req.body.miles);
+    const rate_all_in = Number(req.body.rate_all_in);
 
-  const weight_lbs = int(req.body.weight_lbs);
-  const miles = int(req.body.miles);
+    // other required
+    const payment_terms = clampStr(req.body.payment_terms, 60);
+    const quickpay_available = String(req.body.quickpay_available) === "true";
+    const detention_rate_per_hr = Number(req.body.detention_rate_per_hr);
+    const detention_after_hours = int(req.body.detention_after_hours);
+    const appointment_type = clampStr(req.body.appointment_type, 60);
+    const accessorials = clampStr(req.body.accessorials, 140);
+    const special_requirements = clampStr(req.body.special_requirements, 220);
 
-  const rate_all_in = Number(req.body.rate_all_in);
-  const payment_terms = clampStr(req.body.payment_terms || "NET 30", 60);
-  const quickpay_available = String(req.body.quickpay_available || "false") === "true";
+    if (!lane_from || !lane_to || !pickup_date || !delivery_date || !equipment || !commodity) {
+      return res.status(400).send("Missing required fields.");
+    }
+    if (!payment_terms || !appointment_type) return res.status(400).send("Missing payment terms / appointment type.");
+    if (!Number.isFinite(rate_all_in) || rate_all_in <= 0) return res.status(400).send("Invalid all-in rate.");
+    if (weight_lbs <= 0 || miles <= 0) return res.status(400).send("Invalid miles/weight.");
 
-  const detention_rate_per_hr = Number(req.body.detention_rate_per_hr);
-  const detention_after_hours = int(req.body.detention_after_hours);
-
-  const appointment_type = clampStr(req.body.appointment_type || "FCFS", 60);
-  const accessorials = clampStr(req.body.accessorials || "None", 140);
-  const special_requirements = clampStr(req.body.special_requirements || "None", 220);
-
-  if (!lane_from || !lane_to || !pickup_date || !delivery_date || !equipment || !commodity) {
-    return res.status(400).send("Missing required fields.");
-  }
-
-  await pool.query(
-    `INSERT INTO loads
-     (shipper_id,lane_from,lane_to,pickup_date,delivery_date,equipment,weight_lbs,commodity,miles,
-      rate_all_in,payment_terms,quickpay_available,detention_rate_per_hr,detention_after_hours,
-      appointment_type,accessorials,special_requirements,status)
-     VALUES
-     ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'OPEN')`,
-    [
-      req.user.id, lane_from, lane_to, pickup_date, delivery_date, equipment, weight_lbs, commodity, miles,
-      rate_all_in, payment_terms, quickpay_available, detention_rate_per_hr, detention_after_hours,
-      appointment_type, accessorials, special_requirements
-    ]
-  );
-
-  if (billing.monthly_limit !== -1) {
-    await pool.query(`UPDATE shippers_billing SET loads_used = loads_used + 1, updated_at=NOW() WHERE shipper_id=$1`, [req.user.id]);
-  }
-
-  res.redirect("/dashboard");
-});
-
-app.post("/shipper/requests/:id/accept", requireAuth, requireRole("SHIPPER"), async (req, res) => {
-  const requestId = Number(req.params.id);
-  const r = await pool.query(`
-    SELECT lr.*, l.shipper_id, l.status as load_status, l.lane_from, l.lane_to
-    FROM load_requests lr
-    JOIN loads l ON l.id = lr.load_id
-    WHERE lr.id=$1
-  `, [requestId]);
-
-  const row = r.rows[0];
-  if (!row || row.shipper_id !== req.user.id) return res.sendStatus(404);
-  if (row.load_status === "BOOKED") return res.status(400).send("Load already booked.");
-
-  await pool.query(`UPDATE load_requests SET status='ACCEPTED' WHERE id=$1`, [requestId]);
-  await pool.query(`UPDATE load_requests SET status='DECLINED' WHERE load_id=$1 AND id<>$2`, [row.load_id, requestId]);
-  await pool.query(`UPDATE loads SET status='BOOKED', booked_carrier_id=$1 WHERE id=$2`, [row.carrier_id, row.load_id]);
-
-  const carrierEmail = (await pool.query(`SELECT email FROM users WHERE id=$1`, [row.carrier_id])).rows[0]?.email;
-
-  await sendEmail(
-    req.user.email,
-    `DFX Booking Confirmed • Load #${row.load_id}`,
-    `<p><b>Booking confirmed.</b></p><p>Load #${row.load_id}: ${escapeHtml(row.lane_from)} → ${escapeHtml(row.lane_to)}</p><p>Status: BOOKED</p>`
-  );
-
-  if (carrierEmail) {
-    await sendEmail(
-      carrierEmail,
-      `DFX Request Accepted • Load #${row.load_id}`,
-      `<p><b>Your request was accepted.</b></p><p>Load #${row.load_id}: ${escapeHtml(row.lane_from)} → ${escapeHtml(row.lane_to)}</p><p>Status: BOOKED</p>`
+    await pool.query(
+      `INSERT INTO loads
+       (shipper_id,lane_from,lane_to,pickup_date,delivery_date,equipment,weight_lbs,commodity,miles,
+        rate_all_in,payment_terms,quickpay_available,detention_rate_per_hr,detention_after_hours,
+        appointment_type,accessorials,special_requirements,status)
+       VALUES
+       ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'OPEN')`,
+      [
+        req.user.id, lane_from, lane_to, pickup_date, delivery_date, equipment, weight_lbs, commodity, miles,
+        rate_all_in, payment_terms, quickpay_available, detention_rate_per_hr, detention_after_hours,
+        appointment_type, accessorials, special_requirements
+      ]
     );
-  }
 
-  res.redirect("/dashboard");
+    if (billing.monthly_limit !== -1) {
+      await pool.query(`UPDATE shippers_billing SET loads_used = loads_used + 1, updated_at=NOW() WHERE shipper_id=$1`, [req.user.id]);
+    }
+
+    res.redirect("/dashboard");
+  } catch (e) {
+    console.error("Post load failed:", e);
+    res.status(500).send("Post load failed. Check logs.");
+  }
 });
 
-app.post("/shipper/requests/:id/decline", requireAuth, requireRole("SHIPPER"), async (req, res) => {
-  const requestId = Number(req.params.id);
-  const r = await pool.query(`
-    SELECT lr.*, l.shipper_id, l.lane_from, l.lane_to
-    FROM load_requests lr
-    JOIN loads l ON l.id = lr.load_id
-    WHERE lr.id=$1
-  `, [requestId]);
-
-  const row = r.rows[0];
-  if (!row || row.shipper_id !== req.user.id) return res.sendStatus(404);
-
-  await pool.query(`UPDATE load_requests SET status='DECLINED' WHERE id=$1`, [requestId]);
-
-  const carrierEmail = (await pool.query(`SELECT email FROM users WHERE id=$1`, [row.carrier_id])).rows[0]?.email;
-  if (carrierEmail) {
-    await sendEmail(
-      carrierEmail,
-      `DFX Request Declined • Load #${row.load_id}`,
-      `<p><b>Your request was declined.</b></p><p>Load #${row.load_id}: ${escapeHtml(row.lane_from)} → ${escapeHtml(row.lane_to)}</p>`
-    );
-  }
-
-  res.redirect("/dashboard");
-});
-
-/* ---------- Carrier actions ---------- */
+/* ---------- Carrier compliance upload (metadata only for now) ---------- */
 app.post(
   "/carrier/compliance",
   requireAuth,
@@ -1338,28 +1198,6 @@ app.post(
   }
 );
 
-app.post("/carrier/loads/:id/request", requireAuth, requireRole("CARRIER"), async (req, res) => {
-  const loadId = Number(req.params.id);
-
-  const comp = await pool.query(`SELECT status FROM carriers_compliance WHERE carrier_id=$1`, [req.user.id]);
-  const compStatus = comp.rows[0]?.status || "PENDING";
-  if (compStatus !== "APPROVED") return res.status(403).send("Verification approval required before requesting loads.");
-
-  const load = await pool.query(`SELECT status FROM loads WHERE id=$1`, [loadId]);
-  if (!load.rows[0]) return res.sendStatus(404);
-  if (load.rows[0].status === "BOOKED") return res.status(400).send("Load already booked.");
-
-  await pool.query(
-    `INSERT INTO load_requests (load_id, carrier_id, status) VALUES ($1,$2,'REQUESTED')
-     ON CONFLICT (load_id, carrier_id) DO NOTHING`,
-    [loadId, req.user.id]
-  );
-
-  await pool.query(`UPDATE loads SET status='REQUESTED' WHERE id=$1 AND status='OPEN'`, [loadId]);
-
-  res.redirect("/loads");
-});
-
 /* ---------- Admin compliance ---------- */
 app.post("/admin/carriers/:id/approve", requireAuth, requireRole("ADMIN"), async (req, res) => {
   const carrierId = Number(req.params.id);
@@ -1372,58 +1210,113 @@ app.post("/admin/carriers/:id/reject", requireAuth, requireRole("ADMIN"), async 
   res.redirect("/dashboard");
 });
 
-/* ---------- Load Board: FIXED FILTER SQL (reliable) ---------- */
+/* ---------- Stripe webhook (kept, but not expanded here) ---------- */
+async function upsertBillingFromSubscription({ shipperId, customerId, subscriptionId, subStatus, priceId }) {
+  const plan = planFromPriceId(priceId);
+  const planDef = plan ? PLANS[plan] : null;
+  const mapped =
+    subStatus === "active" ? "ACTIVE" :
+    subStatus === "past_due" ? "PAST_DUE" :
+    subStatus === "canceled" ? "CANCELED" : "INACTIVE";
+  const limit = planDef ? planDef.limit : 0;
+
+  const nowMonth = monthKey();
+  const existing = await pool.query(`SELECT usage_month, loads_used FROM shippers_billing WHERE shipper_id=$1`, [shipperId]);
+  const prevMonth = existing.rows[0]?.usage_month || "";
+  const loadsUsed = existing.rows[0]?.loads_used ?? 0;
+
+  const newMonth = prevMonth && prevMonth === nowMonth ? prevMonth : nowMonth;
+  const newUsed = prevMonth && prevMonth === nowMonth ? loadsUsed : 0;
+
+  await pool.query(
+    `INSERT INTO shippers_billing
+      (shipper_id, stripe_customer_id, stripe_subscription_id, status, plan, monthly_limit, usage_month, loads_used, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
+     ON CONFLICT (shipper_id) DO UPDATE SET
+      stripe_customer_id=EXCLUDED.stripe_customer_id,
+      stripe_subscription_id=EXCLUDED.stripe_subscription_id,
+      status=EXCLUDED.status,
+      plan=EXCLUDED.plan,
+      monthly_limit=EXCLUDED.monthly_limit,
+      usage_month=EXCLUDED.usage_month,
+      loads_used=EXCLUDED.loads_used,
+      updated_at=NOW()`,
+    [shipperId, customerId || null, subscriptionId || null, mapped, plan, limit, newMonth, newUsed]
+  );
+}
+
+app.post("/stripe/webhook", async (req, res) => {
+  if (!stripeEnabled) return res.sendStatus(400);
+
+  let event;
+  try {
+    const sig = req.headers["stripe-signature"];
+    event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
+  } catch (err) {
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  try {
+    if (event.type === "checkout.session.completed") {
+      const session = event.data.object;
+      const shipperId = Number(session.metadata?.shipper_id);
+      const customerId = session.customer;
+      const subscriptionId = session.subscription;
+
+      if (shipperId && subscriptionId) {
+        const sub = await stripe.subscriptions.retrieve(subscriptionId);
+        const priceId = sub.items?.data?.[0]?.price?.id;
+        await upsertBillingFromSubscription({
+          shipperId,
+          customerId,
+          subscriptionId,
+          subStatus: sub.status,
+          priceId,
+        });
+      }
+    }
+    res.json({ received: true });
+  } catch (e) {
+    console.error("Webhook failed:", e);
+    res.sendStatus(500);
+  }
+});
+
+/* ---------- Load Board: JSON API + UI fetch ---------- */
 function buildLoadsQuery(filters) {
   const params = [];
   const where = [];
-
   const push = (val) => { params.push(val); return `$${params.length}`; };
 
-  // Free-text
-  const q = (filters.q || "").trim().toLowerCase();
+  const q = safeLower(filters.q);
   if (q) {
-    const p1 = push(`%${q}%`);
-    const p2 = push(`%${q}%`);
-    const p3 = push(`%${q}%`);
-    where.push(`(lower(lane_from) LIKE ${p1} OR lower(lane_to) LIKE ${p2} OR lower(commodity) LIKE ${p3})`);
+    const p = push(`%${q}%`);
+    where.push(`(lower(lane_from) LIKE ${p} OR lower(lane_to) LIKE ${p} OR lower(commodity) LIKE ${p})`);
   }
 
-  // Origin contains
-  const origin = (filters.origin || "").trim().toLowerCase();
+  const origin = safeLower(filters.origin);
   if (origin) {
     const p = push(`%${origin}%`);
     where.push(`lower(lane_from) LIKE ${p}`);
   }
 
-  // Destination contains
-  const dest = (filters.dest || "").trim().toLowerCase();
+  const dest = safeLower(filters.dest);
   if (dest) {
     const p = push(`%${dest}%`);
     where.push(`lower(lane_to) LIKE ${p}`);
   }
 
-  // Equipment
-  const equipment = (filters.equipment || "").trim();
-  if (equipment) {
-    const p = push(equipment);
-    where.push(`equipment = ${p}`);
-  }
+  const equipment = String(filters.equipment || "").trim();
+  if (equipment) where.push(`equipment = ${push(equipment)}`);
 
-  // Status
-  const status = (filters.status || "").trim();
-  if (status === "ACTIONABLE") {
-    where.push(`status IN ('OPEN','REQUESTED')`);
-  } else if (["OPEN", "REQUESTED", "BOOKED"].includes(status)) {
-    const p = push(status);
-    where.push(`status = ${p}`);
-  }
+  const status = String(filters.status || "").trim();
+  if (status === "ACTIONABLE") where.push(`status IN ('OPEN','REQUESTED')`);
+  else if (["OPEN","REQUESTED","BOOKED"].includes(status)) where.push(`status = ${push(status)}`);
 
-  // QuickPay
-  const qp = (filters.quickpay || "").trim();
+  const qp = String(filters.quickpay || "").trim();
   if (qp === "1") where.push(`quickpay_available = true`);
   if (qp === "0") where.push(`quickpay_available = false`);
 
-  // Numeric ranges
   const minMiles = safeNum(filters.minMiles);
   if (minMiles !== null) where.push(`miles >= ${push(minMiles)}`);
   const maxMiles = safeNum(filters.maxMiles);
@@ -1441,14 +1334,11 @@ function buildLoadsQuery(filters) {
 
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
+  const sort = String(filters.sort || "newest").toLowerCase();
   let orderBy = `ORDER BY created_at DESC, id DESC`;
-  if (filters.sort === "rpm") {
-    orderBy = `ORDER BY (CASE WHEN miles > 0 THEN (rate_all_in::numeric / miles::numeric) ELSE 0 END) DESC, created_at DESC, id DESC`;
-  } else if (filters.sort === "rate") {
-    orderBy = `ORDER BY rate_all_in DESC, created_at DESC, id DESC`;
-  } else if (filters.sort === "miles") {
-    orderBy = `ORDER BY miles DESC, created_at DESC, id DESC`;
-  }
+  if (sort === "rpm") orderBy = `ORDER BY (CASE WHEN miles > 0 THEN (rate_all_in::numeric / miles::numeric) ELSE 0 END) DESC, created_at DESC, id DESC`;
+  if (sort === "rate") orderBy = `ORDER BY rate_all_in DESC, created_at DESC, id DESC`;
+  if (sort === "miles") orderBy = `ORDER BY miles DESC, created_at DESC, id DESC`;
 
   const sql = `
     SELECT *
@@ -1456,50 +1346,49 @@ function buildLoadsQuery(filters) {
     ${whereSql}
     ${orderBy}
   `;
-
   return { sql, params };
 }
 
-function rpmForLoad(l) {
-  const miles = Number(l.miles);
-  const rate = Number(l.rate_all_in);
-  if (!Number.isFinite(miles) || miles <= 0) return 0;
-  if (!Number.isFinite(rate) || rate <= 0) return 0;
-  return rate / miles;
-}
+app.get("/api/loads", async (req, res) => {
+  try {
+    const user = getUser(req);
+    const statusDefault = user?.role === "CARRIER" ? "ACTIONABLE" : "";
+    const filters = {
+      q: req.query.q || "",
+      origin: req.query.origin || "",
+      dest: req.query.dest || "",
+      equipment: req.query.equipment || "",
+      status: req.query.status ?? statusDefault,
+      minMiles: req.query.minMiles,
+      maxMiles: req.query.maxMiles,
+      minWeight: req.query.minWeight,
+      maxWeight: req.query.maxWeight,
+      minRate: req.query.minRate,
+      maxRate: req.query.maxRate,
+      quickpay: req.query.quickpay ?? "",
+      sort: req.query.sort || "newest",
+    };
+
+    const built = buildLoadsQuery(filters);
+    if (DEBUG_LOADS) console.log("[LOADS SQL]", built.sql, built.params);
+
+    const r = await pool.query(built.sql, built.params);
+    res.json({
+      ok: true,
+      build: BUILD_VERSION,
+      count: r.rows.length,
+      filters,
+      rows: r.rows,
+    });
+  } catch (e) {
+    console.error("/api/loads failed:", e);
+    res.status(500).json({ ok: false, error: "api_failed" });
+  }
+});
 
 app.get("/loads", async (req, res) => {
   const user = getUser(req);
-
-  let carrierBadge = null;
-  if (user?.role === "CARRIER") {
-    const comp = await pool.query(`SELECT status FROM carriers_compliance WHERE carrier_id=$1`, [user.id]);
-    carrierBadge = comp.rows[0]?.status || "PENDING";
-  }
-
   const statusDefault = user?.role === "CARRIER" ? "ACTIONABLE" : "";
-  const filters = {
-    q: req.query.q || "",
-    origin: req.query.origin || "",
-    dest: req.query.dest || "",
-    equipment: req.query.equipment || "",
-    status: req.query.status ?? statusDefault,
-    minMiles: req.query.minMiles,
-    maxMiles: req.query.maxMiles,
-    minWeight: req.query.minWeight,
-    maxWeight: req.query.maxWeight,
-    minRate: req.query.minRate,
-    maxRate: req.query.maxRate,
-    quickpay: req.query.quickpay ?? "",
-    sort: String(req.query.sort || "newest").toLowerCase(),
-  };
-
-  const built = buildLoadsQuery(filters);
-  const r = await pool.query(built.sql, built.params);
-
-  const eqOptions = [`<option value="">All equipment</option>`]
-    .concat(EQUIPMENT_OPTIONS.map(e => `<option value="${escapeHtml(e)}"${filters.equipment === e ? " selected" : ""}>${escapeHtml(e)}</option>`))
-    .join("");
 
   const body = `
     <div class="boardGrid">
@@ -1507,68 +1396,69 @@ app.get("/loads", async (req, res) => {
         <div class="row" style="justify-content:space-between">
           <div>
             <div style="font-weight:1000;font-size:16px">Search & Filters</div>
-            <div class="small">Try: Origin “Houston”</div>
+            <div class="small">Example: Origin “Houston”</div>
           </div>
-          <a class="btn ghost" href="/loads">Reset</a>
+          <button class="btn ghost" id="resetBtn" type="button">Reset</button>
         </div>
         <div class="hr"></div>
 
-        <form method="GET" action="/loads">
-          <div style="display:grid; gap:10px">
-            <input name="q" value="${escapeHtml(filters.q)}" placeholder="Search: lane, city, commodity" />
-            <div class="twoCol">
-              <input name="origin" value="${escapeHtml(filters.origin)}" placeholder="Origin contains (Houston)" />
-              <input name="dest" value="${escapeHtml(filters.dest)}" placeholder="Destination contains (Atlanta)" />
-            </div>
-
-            <select name="equipment">${eqOptions}</select>
-
-            <div class="twoCol">
-              <select name="status">
-                <option value="" ${filters.status === "" ? "selected" : ""}>All statuses</option>
-                <option value="ACTIONABLE" ${filters.status === "ACTIONABLE" ? "selected" : ""}>Actionable only (OPEN + REQUESTED)</option>
-                <option value="OPEN" ${filters.status === "OPEN" ? "selected" : ""}>OPEN only</option>
-                <option value="REQUESTED" ${filters.status === "REQUESTED" ? "selected" : ""}>REQUESTED only</option>
-                <option value="BOOKED" ${filters.status === "BOOKED" ? "selected" : ""}>BOOKED only</option>
-              </select>
-
-              <select name="sort">
-                <option value="newest" ${filters.sort === "newest" ? "selected" : ""}>Sort: Newest</option>
-                <option value="rpm" ${filters.sort === "rpm" ? "selected" : ""}>Sort: RPM</option>
-                <option value="rate" ${filters.sort === "rate" ? "selected" : ""}>Sort: Rate</option>
-                <option value="miles" ${filters.sort === "miles" ? "selected" : ""}>Sort: Miles</option>
-              </select>
-            </div>
-
-            <div class="threeCol">
-              <input name="minMiles" value="${escapeHtml(filters.minMiles ?? "")}" placeholder="Min miles" />
-              <input name="maxMiles" value="${escapeHtml(filters.maxMiles ?? "")}" placeholder="Max miles" />
-              <select name="quickpay">
-                <option value="" ${filters.quickpay === "" ? "selected" : ""}>QuickPay: Any</option>
-                <option value="1" ${filters.quickpay === "1" ? "selected" : ""}>QuickPay: Yes</option>
-                <option value="0" ${filters.quickpay === "0" ? "selected" : ""}>QuickPay: No</option>
-              </select>
-            </div>
-
-            <div class="threeCol">
-              <input name="minWeight" value="${escapeHtml(filters.minWeight ?? "")}" placeholder="Min weight (lbs)" />
-              <input name="maxWeight" value="${escapeHtml(filters.maxWeight ?? "")}" placeholder="Max weight (lbs)" />
-              <input name="minRate" value="${escapeHtml(filters.minRate ?? "")}" placeholder="Min rate ($)" />
-            </div>
-
-            <div class="twoCol">
-              <input name="maxRate" value="${escapeHtml(filters.maxRate ?? "")}" placeholder="Max rate ($)" />
-              <div></div>
-            </div>
-
-            <div class="row" style="margin-top:6px">
-              <button class="btn green" type="submit">Apply Filters</button>
-              <a class="btn ghost" href="/loads">Clear</a>
-            </div>
-
-            <div class="small">Showing ${r.rows.length} loads.</div>
+        <div style="display:grid;gap:10px">
+          <input id="q" placeholder="Search: lane, city, commodity" />
+          <div class="twoCol">
+            <input id="origin" placeholder="Origin contains (Houston)" />
+            <input id="dest" placeholder="Destination contains (Atlanta)" />
           </div>
-        </form>
+
+          <select id="equipment">
+            <option value="">All equipment</option>
+            ${EQUIPMENT_OPTIONS.map(e => `<option value="${escapeHtml(e)}">${escapeHtml(e)}</option>`).join("")}
+          </select>
+
+          <div class="twoCol">
+            <select id="status">
+              <option value="" ${statusDefault === "" ? "selected" : ""}>All statuses</option>
+              <option value="ACTIONABLE" ${statusDefault === "ACTIONABLE" ? "selected" : ""}>Actionable (OPEN + REQUESTED)</option>
+              <option value="OPEN">OPEN only</option>
+              <option value="REQUESTED">REQUESTED only</option>
+              <option value="BOOKED">BOOKED only</option>
+            </select>
+
+            <select id="sort">
+              <option value="newest" selected>Sort: Newest</option>
+              <option value="rpm">Sort: RPM</option>
+              <option value="rate">Sort: Rate</option>
+              <option value="miles">Sort: Miles</option>
+            </select>
+          </div>
+
+          <div class="threeCol">
+            <input id="minMiles" placeholder="Min miles" />
+            <input id="maxMiles" placeholder="Max miles" />
+            <select id="quickpay">
+              <option value="" selected>QuickPay: Any</option>
+              <option value="1">QuickPay: Yes</option>
+              <option value="0">QuickPay: No</option>
+            </select>
+          </div>
+
+          <div class="threeCol">
+            <input id="minWeight" placeholder="Min weight (lbs)" />
+            <input id="maxWeight" placeholder="Max weight (lbs)" />
+            <input id="minRate" placeholder="Min rate ($)" />
+          </div>
+
+          <div class="twoCol">
+            <input id="maxRate" placeholder="Max rate ($)" />
+            <div></div>
+          </div>
+
+          <div class="row" style="margin-top:6px">
+            <button class="btn green" id="applyBtn" type="button">Apply Filters</button>
+            <span class="badge" id="countBadge">Results: —</span>
+          </div>
+
+          <div class="small">Build: <span class="mono">${escapeHtml(BUILD_VERSION)}</span></div>
+        </div>
       </div>
 
       <div class="card">
@@ -1576,14 +1466,6 @@ app.get("/loads", async (req, res) => {
           <div>
             <h2 style="margin:0">Load Board</h2>
             <div class="muted">Transparent pricing, terms, and requirements up front.</div>
-            <div class="row" style="margin-top:10px">
-              ${user?.role === "CARRIER"
-                ? `<span class="badge ${carrierBadge === "APPROVED" ? "ok" : "warn"}">Carrier: ${escapeHtml(carrierBadge)}</span>`
-                : user?.role === "SHIPPER"
-                  ? `<a class="btn green" href="/dashboard">Post a Load</a>`
-                  : `<span class="badge">Login to request</span>`}
-              <span class="badge">Results: ${r.rows.length}</span>
-            </div>
           </div>
           <div class="row">
             <a class="btn ghost" href="/terms">Terms</a>
@@ -1593,95 +1475,128 @@ app.get("/loads", async (req, res) => {
 
         <div class="hr"></div>
 
-        ${r.rows.length ? `
-          <table>
-            <thead>
-              <tr>
-                <th>Lane</th>
-                <th>Dates</th>
-                <th>Equipment</th>
-                <th class="mono">Miles</th>
-                <th class="mono">Weight</th>
-                <th class="mono">Rate</th>
-                <th class="mono">RPM</th>
-                <th>Status</th>
-                <th>Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${r.rows.map(l => loadRow(l, user, carrierBadge)).join("")}
-            </tbody>
-          </table>
-        ` : `<div class="muted">No loads match your filters.</div>`}
+        <div id="loads" class="loadList"></div>
       </div>
     </div>
   `;
 
-  res.send(layout({ title: "Loads", user, body }));
+  const extraScript = `
+  <script>
+  const statusDefault = ${JSON.stringify(statusDefault)};
+  const els = (id) => document.getElementById(id);
+
+  function qs(params){
+    const sp = new URLSearchParams();
+    for(const [k,v] of Object.entries(params)){
+      if(v === undefined || v === null) continue;
+      const s = String(v).trim();
+      if(!s) continue;
+      sp.set(k, s);
+    }
+    return sp.toString();
+  }
+
+  function dollars(n){
+    const x = Number(n);
+    if(!Number.isFinite(x)) return "";
+    return "$" + x.toFixed(2);
+  }
+  function rpm(rate, miles){
+    const r = Number(rate), m = Number(miles);
+    if(!Number.isFinite(r) || !Number.isFinite(m) || m <= 0) return 0;
+    return r / m;
+  }
+
+  function renderLoad(l){
+    const r = rpm(l.rate_all_in, l.miles);
+    const chip = (t)=> '<span class="chip">' + t + '</span>';
+    const status = String(l.status || "OPEN");
+    const rtxt = r ? ("$" + r.toFixed(2)) : "—";
+
+    return \`
+      <div class="loadCard">
+        <div class="loadTop">
+          <div>
+            <div class="lane">#\${l.id} \${l.lane_from} → \${l.lane_to}</div>
+            <div class="muted">\${l.pickup_date} → \${l.delivery_date}</div>
+          </div>
+          <div style="text-align:right">
+            <div style="font-weight:1000;font-size:16px">\${dollars(l.rate_all_in)}</div>
+            <div class="small mono">RPM: \${rtxt}</div>
+          </div>
+        </div>
+
+        <div class="chips">
+          \${chip(l.equipment)}
+          \${chip(Number(l.miles).toLocaleString() + " mi")}
+          \${chip(Number(l.weight_lbs).toLocaleString() + " lbs")}
+          \${chip("Commodity: " + l.commodity)}
+          \${chip("Terms: " + l.payment_terms)}
+          \${l.quickpay_available ? chip("QuickPay") : ""}
+          \${chip("Status: " + status)}
+        </div>
+      </div>
+    \`;
+  }
+
+  async function loadData(){
+    const params = {
+      q: els("q").value,
+      origin: els("origin").value,
+      dest: els("dest").value,
+      equipment: els("equipment").value,
+      status: els("status").value,
+      minMiles: els("minMiles").value,
+      maxMiles: els("maxMiles").value,
+      minWeight: els("minWeight").value,
+      maxWeight: els("maxWeight").value,
+      minRate: els("minRate").value,
+      maxRate: els("maxRate").value,
+      quickpay: els("quickpay").value,
+      sort: els("sort").value
+    };
+    // if carrier default actionable and user never touched status, keep it
+    if(!params.status && statusDefault) params.status = statusDefault;
+
+    const url = "/api/loads?" + qs(params);
+    const res = await fetch(url);
+    const data = await res.json();
+
+    const container = els("loads");
+    container.innerHTML = "";
+
+    els("countBadge").textContent = "Results: " + (data.count ?? 0);
+
+    if(!data.ok){
+      container.innerHTML = '<div class="muted">Failed to load loads.</div>';
+      return;
+    }
+    if(!data.rows || data.rows.length === 0){
+      container.innerHTML = '<div class="muted">No loads match your filters.</div>';
+      return;
+    }
+    container.innerHTML = data.rows.map(renderLoad).join("");
+  }
+
+  els("applyBtn").addEventListener("click", loadData);
+  els("resetBtn").addEventListener("click", () => {
+    ["q","origin","dest","minMiles","maxMiles","minWeight","maxWeight","minRate","maxRate"].forEach(id => els(id).value = "");
+    els("equipment").value = "";
+    els("quickpay").value = "";
+    els("sort").value = "newest";
+    els("status").value = statusDefault || "";
+    loadData();
+  });
+
+  // load on page open
+  loadData();
+  </script>
+  `;
+
+  res.send(layout({ title: "Load Board", user, body, extraScript }));
 });
-
-function loadRow(l, user, carrierBadge) {
-  const status = String(l.status || "OPEN");
-  const canRequest = user?.role === "CARRIER";
-  const rpm = rpmForLoad(l);
-
-  const statusBadge =
-    status === "BOOKED" ? "ok" :
-    status === "REQUESTED" ? "warn" : "brand";
-
-  const actionHtml = !canRequest
-    ? (user?.role === "SHIPPER"
-        ? `<span class="chip">Shipper view</span>`
-        : `<a class="btn ghost" href="/login">Login</a>`)
-    : (status === "BOOKED"
-        ? `<span class="badge ok">Booked</span>`
-        : (carrierBadge === "APPROVED"
-            ? `<form method="POST" action="/carrier/loads/${l.id}/request"><button class="btn green" type="submit">Request</button></form>`
-            : `<span class="badge warn">Verify to request</span>`));
-
-  return `
-    <tr>
-      <td>
-        <div class="cellStrong">#${l.id} ${escapeHtml(l.lane_from)} → ${escapeHtml(l.lane_to)}</div>
-        <div class="small">${escapeHtml(l.commodity)} • ${escapeHtml(l.appointment_type)}</div>
-      </td>
-      <td>
-        <div class="mono">${escapeHtml(l.pickup_date)} → ${escapeHtml(l.delivery_date)}</div>
-        <div class="small">Terms: ${escapeHtml(l.payment_terms)}${l.quickpay_available ? " • QuickPay" : ""}</div>
-      </td>
-      <td><span class="chip">${escapeHtml(l.equipment)}</span></td>
-      <td class="mono">${int(l.miles).toLocaleString()}</td>
-      <td class="mono">${int(l.weight_lbs).toLocaleString()}</td>
-      <td class="mono"><span class="cellStrong">${money(l.rate_all_in)}</span></td>
-      <td class="mono"><span class="cellStrong">${rpm ? `$${rpm.toFixed(2)}` : "—"}</span></td>
-      <td><span class="badge ${statusBadge}">${escapeHtml(status)}</span></td>
-      <td>${actionHtml}</td>
-    </tr>
-  `;
-}
-
-function loadCard(l) {
-  const rpm = rpmForLoad(l);
-  return `
-    <div style="padding:14px;border-radius:16px;border:1px solid rgba(255,255,255,.08);background:rgba(6,8,9,.62);margin-top:12px">
-      <div class="row" style="justify-content:space-between">
-        <div>
-          <div style="font-weight:900">#${l.id} ${escapeHtml(l.lane_from)} → ${escapeHtml(l.lane_to)}</div>
-          <div class="muted">${escapeHtml(l.pickup_date)} → ${escapeHtml(l.delivery_date)} • ${escapeHtml(l.equipment)}</div>
-        </div>
-        <div style="text-align:right">
-          <div style="font-weight:900">${money(l.rate_all_in)}</div>
-          <div class="small">RPM: ${rpm ? `$${rpm.toFixed(2)}` : "—"}</div>
-        </div>
-      </div>
-    </div>
-  `;
-}
-
-/* ---------- Health ---------- */
-app.get("/health", (_, res) => res.json({ ok: true, stripeEnabled, smtpEnabled: !!getMailer() }));
 
 /* ---------- Start ---------- */
 initDb()
-  .then(() => app.listen(PORT, "0.0.0.0", () => console.log("Server running on port", PORT)))
+  .then(() => app.listen(PORT, "0.0.0.0", () => console.log("Server running on port", PORT, "build", BUILD_VERSION)))
   .catch((e) => { console.error("DB init failed:", e); process.exit(1); });
