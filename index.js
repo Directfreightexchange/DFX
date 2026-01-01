@@ -37,15 +37,6 @@ const SMTP_FROM = process.env.SMTP_FROM || "no-reply@dfx-usa.com";
 const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || "support@dfx-usa.com";
 const LIVE_CHAT_URL = process.env.LIVE_CHAT_URL || "";
 
-/* --------------------- LOGO (EMBEDDED) --------------------- */
-/**
- * This is your DFX logo embedded as a data URI so you do NOT need /public or any file hosting.
- * If you ever want to swap it later, you can set LOGO_DATA_URI as an env var in Render.
- */
-const LOGO_DATA_URI =
-  process.env.LOGO_DATA_URI ||
-  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAKAAAACgCAYAAACLz2ctAAA78ElEQVR42u3de3BU5Z3/8e9m0iQhQZKQhISQkGQh7mG6m4UqkqjQh4WQd7m0d7iCwq0gqg3n5m3uRk5w0w7gkS0m4S2aXzv+0m0Y0GZkZ9u7v7+7v3v2vPzv3+zv3v7+7t7b7b9+8+Qv8mH9xk3mY0tQkAAABQeV8l6gAAANB8nQAAAKC2AwAAAMwJAAAAgL4DAAAAMAkAAACAvgMAAAAwCQAAAIHq9r0z9w8vXh7Q2kq9nq9n2a3Yd1m2p0bY8a2zj0m3bJk7b9z6o2v4q0wWqk6a9s6YtS4y2bJm2o5gkqGm0kqk1mYc7CqgQwBf8k2r9+0r0bqf0l9m0qvXkq0gK6oS8BvQf1+f8m0o8m3m8m5m8m7m8m9m8m+m8nAnwYcYc2vJgq9dYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9bYcZrQm8g9YAAAAAElFTkSuQmCC";
-
 /* --------------------- REQUIRED ENV --------------------- */
 function bootFail(msg) {
   app.get("*", (_, res) => {
@@ -350,15 +341,6 @@ hr{border:0;height:1px;background:rgba(255,255,255,.10);margin:16px 0}
   background: linear-gradient(135deg, rgba(34,197,94,.98), rgba(163,230,53,.68));
   display:grid;place-items:center; font-weight:1000; color:#06130b;
   box-shadow: 0 22px 60px rgba(34,197,94,.14);
-  overflow:hidden;
-}
-.logoImg{
-  width:100%;
-  height:100%;
-  object-fit:contain;
-  display:block;
-  padding:6px; /* keeps the logo from touching the rounded corners */
-  filter: drop-shadow(0 6px 18px rgba(0,0,0,.25));
 }
 .brandTitle{font-weight:1000;letter-spacing:-.2px}
 .brandSub{color:var(--muted2);font-size:12px;margin-top:2px}
@@ -620,18 +602,15 @@ input:focus,select:focus,textarea:focus{border-color:rgba(34,197,94,.55)}
   </div>
 
   <div class="nav">
-    <a class="brand" href="/" style="text-decoration:none;color:inherit">
-      <div class="mark">
-        <img class="logoImg" src="${LOGO_DATA_URI}" alt="DFX logo"/>
-      </div>
+    <div class="brand">
+      <div class="mark">DFX</div>
       <div>
         <div class="brandTitle">Direct Freight Exchange</div>
         <div class="brandSub">Direct shipper ↔ carrier marketplace • Transparent terms • Faster booking</div>
       </div>
-    </a>
+    </div>
 
     <div class="navLinks">
-      <a class="linkPill" href="/">${icon("spark")} Home</a>
       <a class="linkPill" href="/loads">${icon("search")} Load Board</a>
       <a class="linkPill" href="/features">${icon("tag")} Pricing & Features</a>
       <a class="linkPill" href="/about">${icon("spark")} About</a>
@@ -647,15 +626,13 @@ input:focus,select:focus,textarea:focus{border-color:rgba(34,197,94,.55)}
 
   <div class="footer">
     <div class="footerTop">
-      <a class="brand" href="/" style="gap:10px;text-decoration:none;color:inherit">
-        <div class="mark" style="width:42px;height:42px;border-radius:16px">
-          <img class="logoImg" src="${LOGO_DATA_URI}" alt="DFX logo"/>
-        </div>
+      <div class="brand" style="gap:10px">
+        <div class="mark" style="width:42px;height:42px;border-radius:16px">DFX</div>
         <div>
           <div class="brandTitle">Direct Freight Exchange</div>
           <div class="brandSub">Cut out the middleman. Transparent freight, built for speed.</div>
         </div>
-      </a>
+      </div>
       <div class="footLinks">
         <a href="/terms">Terms</a>
         <a href="/privacy">Privacy</a>
@@ -665,9 +642,7 @@ input:focus,select:focus,textarea:focus{border-color:rgba(34,197,94,.55)}
       </div>
     </div>
     <div class="footText">${escapeHtml(DISCLAIMER_TEXT)}</div>
-    <div class="footLegal">© 2026 Direct Freight Exchange. All rights reserved. • Build: <span class="mono">${escapeHtml(
-      BUILD_VERSION
-    )}</span></div>
+    <div class="footLegal">© 2026 Direct Freight Exchange. All rights reserved. • Build: <span class="mono">${escapeHtml(BUILD_VERSION)}</span></div>
   </div>
 
 </div>
@@ -2563,7 +2538,7 @@ app.post("/shipper/requests/:id/decline", requireAuth, requireRole("SHIPPER"), a
 /* --------------------- RATE CONFIRMATION (AUTO-FILL) --------------------- */
 app.get("/shipper/loads/:id/rate-confirmation", requireAuth, requireRole("SHIPPER"), async (req, res) => {
   const loadId = Number(req.params.id);
-  const l = (await pool.query(`SELECT * FROM loads WHERE id=$1 AND shipper_id=$2`, [loadId, req.user.id])).rows[0;
+  const l = (await pool.query(`SELECT * FROM loads WHERE id=$1 AND shipper_id=$2`, [loadId, req.user.id])).rows[0];
   if (!l) return res.status(404).send("Load not found.");
   if (l.status !== "BOOKED") return res.status(400).send("Rate confirmation is available after booking.");
 
