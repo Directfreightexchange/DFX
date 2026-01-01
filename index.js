@@ -258,38 +258,66 @@ function icon(name) {
   return "";
 }
 
-function logoSvg(){
-  // Simple monogram logo (inline SVG) — no external assets required
-  return `
-    <svg width="26" height="26" viewBox="0 0 64 64" aria-label="DFX logo" role="img">
-      <defs>
-        <linearGradient id="g" x1="0" x2="1" y1="0" y2="1">
-          <stop offset="0" stop-color="#22c55e"/>
-          <stop offset="1" stop-color="#a3e635"/>
-        </linearGradient>
-      </defs>
-      <rect x="6" y="6" width="52" height="52" rx="16" fill="url(#g)"/>
-      <path d="M20 43V21h10c7 0 12 4 12 11s-5 11-12 11H20Zm7-6h3c3 0 5-2 5-5s-2-5-5-5h-3v10Z" fill="#06130b"/>
-      <path d="M44 21h7l-7 11 7 11h-7l-3-6-3 6h-7l7-11-7-11h7l3 6 3-6Z" fill="#06130b" opacity=".92"/>
-    </svg>`;
-}
 
-function logoSvg() {
-  // Simple, clean inline mark (no external assets)
+function logoSvg(variant = "mark") {
+  // Inline SVG logo (no external assets). Two variants:
+  // - mark: compact for nav/foot
+  // - full: larger lockup you can drop anywhere
+  if (variant === "full") {
+    return `
+      <svg viewBox="0 0 760 220" width="260" height="76" role="img" aria-label="Direct Freight Exchange">
+        <defs>
+          <linearGradient id="dfx_swoosh" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0" stop-color="rgba(34,197,94,1)"/>
+            <stop offset="1" stop-color="rgba(163,230,53,1)"/>
+          </linearGradient>
+        </defs>
+
+        <!-- DFX wordmark -->
+        <g transform="skewX(-12) translate(30,40)">
+          <text x="0" y="95" font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial" font-size="120" font-weight="1000" fill="#0b0f0d">DFX</text>
+          <!-- swoosh -->
+          <path d="M35 115 C170 70, 300 60, 470 30" fill="none" stroke="url(#dfx_swoosh)" stroke-width="14" stroke-linecap="round"/>
+        </g>
+
+        <!-- Simple truck silhouette -->
+        <g transform="translate(360,78)">
+          <path d="M10 70 H240 c22 0 40-18 40-40 V20 c0-11-9-20-20-20H165 c-8 0-15 5-18 12l-8 20H10 Z"
+            fill="none" stroke="#0b0f0d" stroke-width="10" stroke-linejoin="round"/>
+          <path d="M175 12 h70 l40 38" fill="none" stroke="#0b0f0d" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+          <circle cx="70" cy="80" r="18" fill="#0b0f0d"/>
+          <circle cx="70" cy="80" r="9" fill="#ffffff"/>
+          <circle cx="205" cy="80" r="18" fill="#0b0f0d"/>
+          <circle cx="205" cy="80" r="9" fill="#ffffff"/>
+          <!-- speed lines -->
+          <path d="M-210 62 H0" stroke="rgba(11,15,13,.45)" stroke-width="10" stroke-linecap="round"/>
+          <path d="M-230 82 H0" stroke="rgba(11,15,13,.25)" stroke-width="8" stroke-linecap="round"/>
+        </g>
+
+        <!-- tagline -->
+        <text x="32" y="196" font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial" font-size="46" font-weight="1000" letter-spacing="2" fill="#0b0f0d">
+          DIRECT FREIGHT EXCHANGE
+        </text>
+      </svg>
+    `;
+  }
+
+  // Compact mark for nav/footer (reads as DFX + swoosh)
   return `
-    <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true">
+    <svg width="26" height="26" viewBox="0 0 64 64" role="img" aria-label="DFX">
       <defs>
-        <linearGradient id="dfx_g" x1="0" y1="0" x2="1" y2="1">
+        <linearGradient id="dfx_mg" x1="0" y1="0" x2="1" y2="1">
           <stop offset="0" stop-color="rgba(34,197,94,1)"/>
           <stop offset="1" stop-color="rgba(163,230,53,1)"/>
         </linearGradient>
       </defs>
-      <path d="M12 2 20 6v6c0 5.2-3.7 9.2-8 10-4.3-.8-8-4.8-8-10V6l8-4Z" fill="url(#dfx_g)"/>
-      <path d="M8.1 12.2h7.8" stroke="rgba(6,19,11,.9)" stroke-width="2" stroke-linecap="round"/>
-      <path d="M10 9.2h4" stroke="rgba(6,19,11,.9)" stroke-width="2" stroke-linecap="round"/>
-      <path d="M10 15.2h4" stroke="rgba(6,19,11,.9)" stroke-width="2" stroke-linecap="round"/>
-    </svg>`;
+      <rect x="4" y="4" width="56" height="56" rx="18" fill="rgba(6,8,9,.55)" stroke="rgba(255,255,255,.10)"/>
+      <path d="M14 38 C26 30, 38 28, 52 22" fill="none" stroke="url(#dfx_mg)" stroke-width="5" stroke-linecap="round"/>
+      <text x="16" y="38" font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial" font-size="22" font-weight="1000" fill="rgba(238,247,241,.96)">DFX</text>
+    </svg>
+  `;
 }
+
 
 /* --------------------- UI (Layout) --------------------- */
 function layout({ title, user, body, extraHead = "", extraScript = "" }) {
@@ -649,7 +677,7 @@ input:focus,select:focus,textarea:focus{border-color:rgba(34,197,94,.55)}
 
   <div class="nav">
     <div class="brand">
-      <div class="mark" title="Direct Freight Exchange">${logoSvg()}</div>
+      <div class="mark" title="Direct Freight Exchange">${logoSvg("mark")}</div>
       <div>
         <div class="brandTitle">Direct Freight Exchange</div>
         <div class="brandSub">Direct shipper ↔ carrier marketplace • Transparent terms • Faster booking</div>
@@ -657,7 +685,7 @@ input:focus,select:focus,textarea:focus{border-color:rgba(34,197,94,.55)}
     </div>
 
     <div class="navLinks">
-<a class="linkPill" href="/">${icon("home")} Home</a>
+      <a class="linkPill" href="/">${icon("home")} Home</a>
       <a class="linkPill" href="/loads">${icon("search")} Load Board</a>
       <a class="linkPill" href="/features">${icon("tag")} Pricing & Features</a>
       <a class="linkPill" href="/contracts">${icon("clipboard")} Contracts</a>
@@ -675,7 +703,7 @@ input:focus,select:focus,textarea:focus{border-color:rgba(34,197,94,.55)}
   <div class="footer">
     <div class="footerTop">
       <div class="brand" style="gap:10px">
-        <div class="mark" style="width:42px;height:42px;border-radius:16px" title="Direct Freight Exchange">${logoSvg()}</div>
+        <div class="mark" style="width:42px;height:42px;border-radius:16px" title="Direct Freight Exchange">${logoSvg("mark")}</div>
         <div>
           <div class="brandTitle">Direct Freight Exchange</div>
           <div class="brandSub">Cut out the middleman. Transparent freight, built for speed.</div>
@@ -795,22 +823,6 @@ async function initDb() {
 
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
-
-    CREATE TABLE IF NOT EXISTS documents (
-      id SERIAL PRIMARY KEY,
-      scope TEXT NOT NULL CHECK (scope IN ('CARRIER','LOAD')),
-      carrier_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-      load_id INTEGER REFERENCES loads(id) ON DELETE CASCADE,
-      uploaded_by_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      category TEXT NOT NULL,
-      filename TEXT NOT NULL,
-      mimetype TEXT NOT NULL,
-      bytes BYTEA NOT NULL,
-      uploaded_at TIMESTAMPTZ DEFAULT NOW()
-    );
-    CREATE INDEX IF NOT EXISTS idx_documents_scope ON documents(scope);
-    CREATE INDEX IF NOT EXISTS idx_documents_carrier ON documents(carrier_id);
-    CREATE INDEX IF NOT EXISTS idx_documents_load ON documents(load_id);
 
     CREATE TABLE IF NOT EXISTS load_requests (
       id SERIAL PRIMARY KEY,
@@ -1251,7 +1263,10 @@ app.get("/contracts", (req, res) => {
             <div class="featureTitle">Shipper ↔ Carrier Load Agreement (Template)</div>
             <div class="featureText">
               A simple, plain‑language template covering scope, payment terms, accessorials, detention, and claims.
-              <div style="margin-top:12px" class="small">Coming soon: downloadable PDF/DOCX built into the app.</div>
+              <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap">
+                <a class="btn btnPrimary" href="/contracts/shipper-template.pdf" target="_blank" rel="noopener noreferrer">Download PDF</a>
+                <a class="btn btnGhost" href="/contracts/shipper-template.txt" target="_blank" rel="noopener noreferrer">View text</a>
+              </div>
             </div>
           </div>
 
@@ -1259,7 +1274,10 @@ app.get("/contracts", (req, res) => {
             <div class="featureTitle">Carrier Packet Checklist</div>
             <div class="featureText">
               W‑9 • COI • Authority • banking info • contact roles • safety notes. Use it to standardize onboarding.
-              <div style="margin-top:12px" class="small">Tip: carriers upload W‑9/COI/Authority in the dashboard.</div>
+              <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap">
+                <a class="btn btnPrimary" href="/contracts/carrier-packet.pdf" target="_blank" rel="noopener noreferrer">Download PDF</a>
+                <a class="btn btnGhost" href="/contracts/carrier-packet.txt" target="_blank" rel="noopener noreferrer">View text</a>
+              </div>
             </div>
           </div>
 
@@ -1284,136 +1302,131 @@ app.get("/contracts", (req, res) => {
   }));
 });
 
-/* --------------------- CONTRACTS (PRE-BUILT) --------------------- */
-app.get("/contracts", (req, res) => {
-  const user = getUser(req);
-  const body = `
-    <div class="section">
-      <div class="spread">
-        <div>
-          <h2 style="margin:0">Pre-built contracts</h2>
-          <div class="muted" style="margin-top:8px;line-height:1.6;max-width:980px">
-            Download clean, printable templates. Customize internally with your legal team.
-          </div>
-        </div>
-        <a class="btn btnGhost" href="/dashboard">${icon("clipboard")} Back to dashboard</a>
-      </div>
 
-      <div class="divider"></div>
+// Contract templates (PDF + plain text). PDF generation uses pdfkit if installed.
+let PDFDocument = null;
+try { PDFDocument = require("pdfkit"); } catch { /* optional */ }
 
-      <div class="grid3">
-        <div class="feature">
-          <div class="featureTop">
-            <div class="featureIcon">${icon("clipboard")}</div>
-            <div>
-              <div class="featureTitle">Shipper ↔ Carrier Agreement</div>
-              <div class="small">Master terms template (short + practical)</div>
-            </div>
-          </div>
-          <div class="divider"></div>
-          <a class="btn btnPrimary" href="/contracts/shipper-carrier-agreement.pdf" target="_blank">Download PDF</a>
-        </div>
-
-        <div class="feature">
-          <div class="featureTop">
-            <div class="featureIcon">${icon("tag")}</div>
-            <div>
-              <div class="featureTitle">Carrier Packet Checklist</div>
-              <div class="small">What to collect (W-9, COI, Authority, etc.)</div>
-            </div>
-          </div>
-          <div class="divider"></div>
-          <a class="btn btnPrimary" href="/contracts/carrier-packet-checklist.pdf" target="_blank">Download PDF</a>
-        </div>
-
-        <div class="feature">
-          <div class="featureTop">
-            <div class="featureIcon">${icon("shield")}</div>
-            <div>
-              <div class="featureTitle">Accessorials & Detention Addendum</div>
-              <div class="small">Simple schedule you can attach to confirmations</div>
-            </div>
-          </div>
-          <div class="divider"></div>
-          <a class="btn btnPrimary" href="/contracts/accessorials-detentions.pdf" target="_blank">Download PDF</a>
-        </div>
-      </div>
-
-      <div class="divider"></div>
-      <div class="small">
-        Note: These templates are provided for convenience and are not legal advice.
-      </div>
-    </div>
-  `;
-  res.send(layout({ title: "Contracts", user, body }));
-});
-
-function sendPdf(res, filename, title, lines){
-  const pdf = simplePdfBuffer({ title, lines });
-  res.setHeader("Content-Type", "application/pdf");
-  res.setHeader("Content-Disposition", `inline; filename="${filename.replaceAll('"',"")}"`);
-  res.send(pdf);
+function pdfToBuffer(buildFn) {
+  return new Promise((resolve, reject) => {
+    if (!PDFDocument) return reject(new Error("pdfkit_not_installed"));
+    const doc = new PDFDocument({ size: "LETTER", margin: 50 });
+    const chunks = [];
+    doc.on("data", (c) => chunks.push(c));
+    doc.on("end", () => resolve(Buffer.concat(chunks)));
+    doc.on("error", reject);
+    buildFn(doc);
+    doc.end();
+  });
 }
 
-app.get("/contracts/shipper-carrier-agreement.pdf", (req, res) => {
-  sendPdf(res, "dfx-shipper-carrier-agreement.pdf", "DFX • Shipper ↔ Carrier Agreement (Template)", [
-    "Effective Date: ______________________",
-    "",
-    "This agreement is between:",
-    "Shipper: _____________________________",
-    "Carrier: _____________________________",
-    "",
-    "1. Scope. Carrier will transport freight as tendered by Shipper.",
-    "2. Authority & Insurance. Carrier represents valid operating authority and insurance (auto + cargo).",
-    "3. Rate & Payment. Rates per load confirmation. Payment terms: ____________ (e.g., Net 30).",
-    "4. Detention & Accessorials. As listed on each load or addendum.",
-    "5. Claims. Carrier responsible for loss/damage per applicable law and agreed limits.",
-    "6. Subcontracting. No re-brokering without Shipper written consent.",
-    "7. Confidentiality. Parties keep shipper pricing and lane info confidential.",
-    "8. Termination. Either party may terminate with written notice.",
-    "",
-    "Signatures:",
-    "Shipper Authorized: ___________________   Date: ____________",
-    "Carrier Authorized: ___________________   Date: ____________",
-  ]);
+function shipperTemplateText() {
+  return `DIRECT FREIGHT EXCHANGE (DFX) — SHIPPER ↔ CARRIER LOAD AGREEMENT (TEMPLATE)
+
+1) Parties
+Shipper: __________________________
+Carrier: __________________________
+
+2) Scope
+Carrier agrees to transport freight as tendered by Shipper under the load terms (rate, lane, dates, accessorials).
+
+3) Rate & Payment
+All-in rate: ____________  Payment terms: ____________
+Carrier will invoice per agreed terms. Any QuickPay terms must be explicitly listed on the rate confirmation.
+
+4) Accessorials & Detention
+Accessorials must be pre-approved unless safety/emergency.
+Detention rate: $______/hr after ______ hours (unless otherwise stated on the load).
+
+5) Claims & Liability
+Carrier maintains required insurance (Auto + Cargo). Claims must be reported within ____ hours of delivery.
+
+6) Compliance
+Carrier represents it maintains valid authority and required insurance for all moves.
+
+7) Confidentiality
+Both parties agree to keep commercial terms confidential.
+
+8) Entire Agreement
+This template is a starting point. Final terms are those on the executed rate confirmation and any signed amendments.
+
+SIGNATURES
+Shipper: __________________  Date: _________
+Carrier: __________________  Date: _________
+`;
+}
+
+function carrierPacketText() {
+  return `DFX — CARRIER PACKET (TEMPLATE CHECKLIST)
+
+Required:
+- W-9
+- Certificate of Insurance (Auto Liability + Cargo)
+- Operating Authority (MC/DOT proof)
+
+Recommended:
+- Banking / ACH information (for payment)
+- Dispatch contact + after-hours contact
+- Safety contact
+- Standard accessorial schedule (lumper, tarp, etc.)
+- QuickPay preferences + fee schedule (if offered)
+- Claims contact & process
+
+Notes:
+- Keep documents current. Expired insurance may pause load requesting.
+`;
+}
+
+app.get("/contracts/shipper-template.txt", (req, res) => {
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  res.send(shipperTemplateText());
 });
 
-app.get("/contracts/carrier-packet-checklist.pdf", (req, res) => {
-  sendPdf(res, "dfx-carrier-packet-checklist.pdf", "DFX • Carrier Packet Checklist", [
-    "Use this checklist to onboard carriers quickly.",
-    "",
-    "Required:",
-    "□ W-9",
-    "□ Certificate of Insurance (Auto Liability + Cargo)",
-    "□ Operating Authority (MC/DOT proof)",
-    "",
-    "Recommended:",
-    "□ Banking / ACH form",
-    "□ Safety letter / claims contact",
-    "□ Primary dispatcher contact info",
-    "",
-    "Notes:",
-    "____________________________________________",
-    "____________________________________________",
-  ]);
+app.get("/contracts/carrier-packet.txt", (req, res) => {
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  res.send(carrierPacketText());
 });
 
-app.get("/contracts/accessorials-detentions.pdf", (req, res) => {
-  sendPdf(res, "dfx-accessorials-detentions.pdf", "DFX • Accessorials & Detention Addendum (Template)", [
-    "Detention:",
-    "- Free time: ______ hours after appointment/check-in",
-    "- Rate: $______ / hour",
-    "",
-    "Common accessorials (fill in if applicable):",
-    "- Lumper: $______",
-    "- Tarp: $______",
-    "- TONU: $______",
-    "- Stop-off: $______",
-    "- Hazmat: $______",
-    "",
-    "Authorized by:",
-    "Shipper: ____________________   Date: ____________",
-  ]);
+app.get("/contracts/shipper-template.pdf", async (req, res) => {
+  try {
+    const pdf = await pdfToBuffer((doc) => {
+      doc.fontSize(18).text("DFX Shipper ↔ Carrier Load Agreement (Template)", { align: "center" });
+      doc.moveDown(0.5);
+      doc.fontSize(10).fillColor("#555").text(`Generated: ${new Date().toISOString()}`, { align: "center" });
+      doc.moveDown(1);
+      doc.fillColor("#000").fontSize(11).text(shipperTemplateText());
+    });
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename="DFX_Shipper_Carrier_Agreement_Template.pdf"`);
+    res.send(pdf);
+  } catch (e) {
+    if (String(e.message) === "pdfkit_not_installed") {
+      return res.status(500).send("PDF generation requires pdfkit. Run: npm i pdfkit");
+    }
+    console.error(e);
+    res.status(500).send("Failed to generate PDF.");
+  }
+});
+
+app.get("/contracts/carrier-packet.pdf", async (req, res) => {
+  try {
+    const pdf = await pdfToBuffer((doc) => {
+      doc.fontSize(18).text("DFX Carrier Packet (Template Checklist)", { align: "center" });
+      doc.moveDown(0.5);
+      doc.fontSize(10).fillColor("#555").text(`Generated: ${new Date().toISOString()}`, { align: "center" });
+      doc.moveDown(1);
+      doc.fillColor("#000").fontSize(11).text(carrierPacketText());
+    });
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename="DFX_Carrier_Packet_Template.pdf"`);
+    res.send(pdf);
+  } catch (e) {
+    if (String(e.message) === "pdfkit_not_installed") {
+      return res.status(500).send("PDF generation requires pdfkit. Run: npm i pdfkit");
+    }
+    console.error(e);
+    res.status(500).send("Failed to generate PDF.");
+  }
 });
 
 /* --------------------- HOME --------------------- */
@@ -1422,6 +1435,14 @@ app.get("/", (req, res) => {
 
   const body = `
     <div class="hero">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap">
+        <div style="display:flex;align-items:center;gap:12px">
+          <div style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.10);border-radius:22px;padding:10px 12px;box-shadow:0 22px 60px rgba(0,0,0,.25)">
+            ${logoSvg("full")}
+          </div>
+        </div>
+      </div>
+
       <div class="heroGrid">
         <div>
           <div class="badgeRow">
@@ -1449,7 +1470,6 @@ app.get("/", (req, res) => {
             <a class="btn btnPrimary" href="${user ? "/dashboard" : "/signup"}">${user ? "Go to Dashboard" : "Create account"}</a>
             <a class="btn btnGhost" href="/loads">${icon("search")} Browse Load Board</a>
             <a class="btn btnGhost" href="/how-it-works">${icon("clipboard")} How it works</a>
-            <a class="btn btnGhost" href="/contracts">${icon("clipboard")} Contracts</a>
           </div>
 
           <div class="divider"></div>
@@ -1560,53 +1580,6 @@ app.get("/", (req, res) => {
             <a class="btn btnPrimary" href="${user ? "/dashboard" : "/signup"}">Carrier signup</a>
             <a class="btn btnGhost" href="/loads">Browse loads</a>
           </div>
-        </div>
-      </div>
-    </div>
-
-<div class="section">
-      <div class="spread">
-        <div>
-          <h2 style="margin:0">Pre-built contracts</h2>
-          <div class="muted" style="margin-top:8px;line-height:1.6;max-width:980px">
-            Download clean templates (PDF) for common freight paperwork. Keep everything inside DFX.
-          </div>
-        </div>
-        <a class="btn btnPrimary" href="/contracts">${icon("clipboard")} View contracts</a>
-      </div>
-
-      <div class="divider"></div>
-
-      <div class="grid3">
-        <div class="feature">
-          <div class="featureTop">
-            <div class="featureIcon">${icon("clipboard")}</div>
-            <div>
-              <div class="featureTitle">Shipper ↔ Carrier Agreement</div>
-              <div class="small">Master terms template</div>
-            </div>
-          </div>
-          <div class="featureText">Use as a starting point for onboarding and repeat business.</div>
-        </div>
-        <div class="feature">
-          <div class="featureTop">
-            <div class="featureIcon">${icon("shield")}</div>
-            <div>
-              <div class="featureTitle">Carrier packet checklist</div>
-              <div class="small">Make onboarding fast</div>
-            </div>
-          </div>
-          <div class="featureText">Standardize W-9, COI, authority, and contact collection.</div>
-        </div>
-        <div class="feature">
-          <div class="featureTop">
-            <div class="featureIcon">${icon("tag")}</div>
-            <div>
-              <div class="featureTitle">Accessorials addendum</div>
-              <div class="small">Detention + common fees</div>
-            </div>
-          </div>
-          <div class="featureText">Attach to rate confirmations or keep as policy.</div>
         </div>
       </div>
     </div>
@@ -2077,10 +2050,8 @@ app.get("/dashboard", requireAuth, async (req, res) => {
               <div style="text-align:right">
                 <div style="font-weight:1000;font-size:18px">${money(l.rate_all_in)}</div>
                 <div class="small mono">RPM: ${rpm(l.rate_all_in, l.miles) ? `$${rpm(l.rate_all_in, l.miles).toFixed(2)}` : "—"}</div>
-                <div style="margin-top:12px"><a class="btn btnGhost" href="/loads/${l.id}/documents">Documents</a></div>
                 <div style="margin-top:12px">
                   <a class="btn btnPrimary" href="/shipper/loads/${l.id}/rate-confirmation" target="_blank">Open rate confirmation</a>
-                  <a class="btn btnGhost" href="/loads/${l.id}/documents">Documents</a>
                 </div>
               </div>
             </div>
@@ -2198,7 +2169,6 @@ app.get("/dashboard", requireAuth, async (req, res) => {
             </p>
             <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap">
               <a class="btn btnPrimary" href="/loads">${icon("search")} Go to load board</a>
-              <a class="btn btnGhost" href="/carrier/documents">${icon("clipboard")} Documents</a>
               <a class="btn btnGhost" href="/how-it-works">${icon("clipboard")} How it works</a>
             </div>
           </div>
@@ -3005,343 +2975,6 @@ app.post("/carrier/loads/:id/bol", requireAuth, requireRole("CARRIER"), upload.s
   );
 
   res.redirect("/dashboard");
-});
-
-/* --------------------- DOCUMENTS (VISIBLE IN-APP) --------------------- */
-// Download a document (with auth checks)
-app.get("/documents/:id", requireAuth, async (req, res) => {
-  const docId = Number(req.params.id);
-  const d = (await pool.query(`SELECT * FROM documents WHERE id=$1`, [docId])).rows[0];
-  if (!d) return res.sendStatus(404);
-
-  const user = req.user;
-
-  if (d.scope === "CARRIER") {
-    if (user.role !== "ADMIN" && Number(d.carrier_id) !== Number(user.id)) return res.sendStatus(403);
-  } else if (d.scope === "LOAD") {
-    const l = (await pool.query(`SELECT shipper_id, booked_carrier_id FROM loads WHERE id=$1`, [d.load_id])).rows[0];
-    if (!l) return res.sendStatus(404);
-    const ok =
-      user.role === "ADMIN" ||
-      Number(l.shipper_id) === Number(user.id) ||
-      (l.booked_carrier_id && Number(l.booked_carrier_id) === Number(user.id));
-    if (!ok) return res.sendStatus(403);
-  } else {
-    return res.sendStatus(400);
-  }
-
-  res.setHeader("Content-Type", d.mimetype || "application/octet-stream");
-  res.setHeader("Content-Disposition", `inline; filename="${String(d.filename || "document").replaceAll('"', "")}"`);
-  res.send(d.bytes);
-});
-
-// Carrier: Documents tab (shows W9/COI/Auth + extra uploads)
-app.get("/carrier/documents", requireAuth, requireRole("CARRIER"), async (req, res) => {
-  const user = req.user;
-  const q = safeLower(req.query.q || "");
-  const like = q ? `%${q}%` : null;
-
-  const baseDocs = await pool.query(
-    q
-      ? `SELECT d.*, u.email as uploaded_by_email
-         FROM documents d
-         JOIN users u ON u.id = d.uploaded_by_user_id
-         WHERE d.scope='CARRIER' AND d.carrier_id=$1 AND (lower(d.filename) LIKE $2 OR lower(d.category) LIKE $2)
-         ORDER BY d.uploaded_at DESC`
-      : `SELECT d.*, u.email as uploaded_by_email
-         FROM documents d
-         JOIN users u ON u.id = d.uploaded_by_user_id
-         WHERE d.scope='CARRIER' AND d.carrier_id=$1
-         ORDER BY d.uploaded_at DESC`,
-    q ? [user.id, like] : [user.id]
-  );
-
-  const reqFiles = await pool.query(
-    `SELECT kind, filename, mimetype, uploaded_at FROM carrier_files WHERE carrier_id=$1 ORDER BY kind`,
-    [user.id]
-  );
-
-  const rowsHtml = baseDocs.rows.length
-    ? baseDocs.rows.map(d => `
-      <div class="loadCard" style="margin-top:10px">
-        <div class="loadTop">
-          <div>
-            <div class="lane">${escapeHtml(d.category)} • ${escapeHtml(d.filename)}</div>
-            <div class="muted">Uploaded by ${escapeHtml(d.uploaded_by_email)} • ${new Date(d.uploaded_at).toLocaleString()}</div>
-          </div>
-          <div style="display:flex;gap:10px;flex-wrap:wrap">
-            <a class="btn btnPrimary" href="/documents/${d.id}" target="_blank">Open</a>
-          </div>
-        </div>
-      </div>
-    `).join("")
-    : `<div class="muted">No extra documents yet.</div>`;
-
-  const requiredHtml = reqFiles.rows.map(f => `
-    <div class="loadCard" style="margin-top:10px">
-      <div class="loadTop">
-        <div>
-          <div class="lane">${escapeHtml(f.kind)} • ${escapeHtml(f.filename)}</div>
-          <div class="muted">Uploaded: ${f.uploaded_at ? new Date(f.uploaded_at).toLocaleString() : "—"}</div>
-        </div>
-        <div style="display:flex;gap:10px;flex-wrap:wrap">
-          <a class="btn btnGhost" href="/admin/carriers/${user.id}/file/${escapeHtml(f.kind)}" target="_blank">Open</a>
-        </div>
-      </div>
-    </div>
-  `).join("");
-
-  const body = `
-    <div class="section">
-      <div class="spread">
-        <div>
-          <h2 style="margin:0">Carrier Documents</h2>
-          <div class="muted" style="margin-top:8px;line-height:1.6">Everything you upload lives inside DFX — searchable and downloadable.</div>
-        </div>
-        <a class="btn btnGhost" href="/dashboard">${icon("clipboard")} Back to dashboard</a>
-      </div>
-
-      <div class="divider"></div>
-
-      <form method="GET" action="/carrier/documents" class="formGrid" style="max-width:720px">
-        <div class="twoCol">
-          <input name="q" placeholder="Search documents (filename or category)" value="${escapeHtml(req.query.q || "")}" />
-          <button class="btn btnPrimary" type="submit">${icon("search")} Search</button>
-        </div>
-      </form>
-
-      <div class="divider"></div>
-
-      <h3 style="margin:0">Required verification docs</h3>
-      <div class="muted" style="margin-top:6px">W-9, COI, and Authority are stored and reviewed by admins.</div>
-      ${requiredHtml || `<div class="muted" style="margin-top:10px">No verification docs found yet.</div>`}
-
-      <div class="divider"></div>
-
-      <h3 style="margin:0">Additional documents</h3>
-      <div class="muted" style="margin-top:6px">Add ACH forms, safety letters, carrier packets, etc.</div>
-
-      <form method="POST" action="/carrier/documents" enctype="multipart/form-data" class="formGrid" style="margin-top:12px;max-width:820px">
-        <div class="threeCol">
-          <select name="category" required>
-            <option value="" selected disabled>Category</option>
-            <option value="ACH / Banking">ACH / Banking</option>
-            <option value="Safety Letter">Safety Letter</option>
-            <option value="Carrier Packet">Carrier Packet</option>
-            <option value="Other">Other</option>
-          </select>
-          <input type="file" name="file" required />
-          <button class="btn btnPrimary" type="submit">${icon("bolt")} Upload</button>
-        </div>
-        <div class="small">Accepted: PDF or images. Stored securely and visible in this Documents tab.</div>
-      </form>
-
-      <div class="divider"></div>
-      ${rowsHtml}
-    </div>
-  `;
-  res.send(layout({ title: "Carrier Documents", user, body }));
-});
-
-app.post("/carrier/documents", requireAuth, requireRole("CARRIER"), upload.single("file"), async (req, res) => {
-  const file = req.file;
-  const category = clampStr(req.body.category, 60);
-  if (!file) return res.status(400).send("Missing file.");
-  if (!category) return res.status(400).send("Missing category.");
-
-  await pool.query(
-    `INSERT INTO documents (scope, carrier_id, uploaded_by_user_id, category, filename, mimetype, bytes)
-     VALUES ('CARRIER',$1,$2,$3,$4,$5,$6)`,
-    [req.user.id, req.user.id, category, file.originalname, file.mimetype || "application/octet-stream", file.buffer]
-  );
-  res.redirect("/carrier/documents");
-});
-
-// Load: Documents tab
-app.get("/loads/:id/documents", requireAuth, async (req, res) => {
-  const user = req.user;
-  const loadId = Number(req.params.id);
-
-  const l = (await pool.query(`SELECT * FROM loads WHERE id=$1`, [loadId])).rows[0];
-  if (!l) return res.sendStatus(404);
-
-  const isShipper = Number(l.shipper_id) === Number(user.id);
-  const isBookedCarrier = l.booked_carrier_id && Number(l.booked_carrier_id) === Number(user.id);
-  const isAdmin = user.role === "ADMIN";
-  if (!isShipper && !isBookedCarrier && !isAdmin) return res.sendStatus(403);
-
-  const q = safeLower(req.query.q || "");
-  const like = q ? `%${q}%` : null;
-
-  const docs = await pool.query(
-    q
-      ? `SELECT d.*, u.email as uploaded_by_email
-         FROM documents d
-         JOIN users u ON u.id = d.uploaded_by_user_id
-         WHERE d.scope='LOAD' AND d.load_id=$1 AND (lower(d.filename) LIKE $2 OR lower(d.category) LIKE $2)
-         ORDER BY d.uploaded_at DESC`
-      : `SELECT d.*, u.email as uploaded_by_email
-         FROM documents d
-         JOIN users u ON u.id = d.uploaded_by_user_id
-         WHERE d.scope='LOAD' AND d.load_id=$1
-         ORDER BY d.uploaded_at DESC`,
-    q ? [loadId, like] : [loadId]
-  );
-
-  const bols = await pool.query(
-    `SELECT lf.*, u.email as uploaded_by_email
-     FROM load_files lf
-     JOIN users u ON u.id = lf.uploaded_by_user_id
-     WHERE lf.load_id=$1
-     ORDER BY lf.uploaded_at DESC`,
-    [loadId]
-  );
-
-  const canUpload = isShipper || isBookedCarrier || isAdmin;
-  const canUploadBol = isBookedCarrier || isAdmin;
-
-  const docsHtml = docs.rows.length ? docs.rows.map(d => `
-    <div class="loadCard" style="margin-top:10px">
-      <div class="loadTop">
-        <div>
-          <div class="lane">${escapeHtml(d.category)} • ${escapeHtml(d.filename)}</div>
-          <div class="muted">Uploaded by ${escapeHtml(d.uploaded_by_email)} • ${new Date(d.uploaded_at).toLocaleString()}</div>
-        </div>
-        <div style="display:flex;gap:10px;flex-wrap:wrap">
-          <a class="btn btnPrimary" href="/documents/${d.id}" target="_blank">Open</a>
-        </div>
-      </div>
-    </div>
-  `).join("") : `<div class="muted">No load documents yet.</div>`;
-
-  const bolHtml = bols.rows.length ? bols.rows.map(b => `
-    <div class="loadCard" style="margin-top:10px">
-      <div class="loadTop">
-        <div>
-          <div class="lane">${escapeHtml(b.kind)} • ${escapeHtml(b.filename)}</div>
-          <div class="muted">Uploaded by ${escapeHtml(b.uploaded_by_email)} • ${new Date(b.uploaded_at).toLocaleString()}</div>
-        </div>
-        <div style="display:flex;gap:10px;flex-wrap:wrap">
-          <a class="btn btnGhost" href="/loads/${loadId}/bol/${b.id}" target="_blank">Open</a>
-        </div>
-      </div>
-    </div>
-  `).join("") : `<div class="muted">No BOL files uploaded yet.</div>`;
-
-  const rateConLink = l.status === "BOOKED" && isShipper ? `<a class="btn btnPrimary" href="/shipper/loads/${loadId}/rate-confirmation" target="_blank">Open rate confirmation</a>` : "";
-
-  const body = `
-    <div class="section">
-      <div class="spread">
-        <div>
-          <h2 style="margin:0">Load #${l.id} • Documents</h2>
-          <div class="muted" style="margin-top:8px;line-height:1.6">${escapeHtml(l.lane_from)} → ${escapeHtml(l.lane_to)} • Status: ${escapeHtml(l.status)}</div>
-        </div>
-        <div style="display:flex;gap:10px;flex-wrap:wrap">
-          ${rateConLink}
-          <a class="btn btnGhost" href="/dashboard">${icon("clipboard")} Back to dashboard</a>
-        </div>
-      </div>
-
-      <div class="divider"></div>
-
-      <form method="GET" action="/loads/${l.id}/documents" class="formGrid" style="max-width:720px">
-        <div class="twoCol">
-          <input name="q" placeholder="Search documents (filename or category)" value="${escapeHtml(req.query.q || "")}" />
-          <button class="btn btnPrimary" type="submit">${icon("search")} Search</button>
-        </div>
-      </form>
-
-      <div class="divider"></div>
-
-      <h3 style="margin:0">BOL (Bill of Lading)</h3>
-      <div class="muted" style="margin-top:6px">BOLs are uploaded by the booked carrier (or admin) after booking.</div>
-      ${canUploadBol ? `
-        <form method="POST" action="/carrier/loads/${l.id}/bol" enctype="multipart/form-data" class="formGrid" style="margin-top:12px;max-width:820px">
-          <div class="threeCol">
-            <input type="file" name="bol" required />
-            <div></div>
-            <button class="btn btnPrimary" type="submit">${icon("bolt")} Upload BOL</button>
-          </div>
-        </form>
-      ` : `<div class="badge badgeWarn" style="margin-top:10px">Only the booked carrier can upload a BOL.</div>`}
-      ${bolHtml}
-
-      <div class="divider"></div>
-
-      <h3 style="margin:0">Other load documents</h3>
-      <div class="muted" style="margin-top:6px">PODs, invoices, photos, notes — stored inside DFX with an audit trail.</div>
-
-      ${canUpload ? `
-        <form method="POST" action="/loads/${l.id}/documents" enctype="multipart/form-data" class="formGrid" style="margin-top:12px;max-width:920px">
-          <div class="threeCol">
-            <select name="category" required>
-              <option value="" selected disabled>Category</option>
-              <option value="POD">POD</option>
-              <option value="Invoice">Invoice</option>
-              <option value="Photos">Photos</option>
-              <option value="Other">Other</option>
-            </select>
-            <input type="file" name="file" required />
-            <button class="btn btnPrimary" type="submit">${icon("bolt")} Upload</button>
-          </div>
-        </form>
-      ` : ``}
-
-      ${docsHtml}
-    </div>
-  `;
-
-  res.send(layout({ title: "Load Documents", user, body }));
-});
-
-app.post("/loads/:id/documents", requireAuth, upload.single("file"), async (req, res) => {
-  const user = req.user;
-  const loadId = Number(req.params.id);
-  const file = req.file;
-  const category = clampStr(req.body.category, 60);
-
-  if (!file) return res.status(400).send("Missing file.");
-  if (!category) return res.status(400).send("Missing category.");
-
-  const l = (await pool.query(`SELECT shipper_id, booked_carrier_id FROM loads WHERE id=$1`, [loadId])).rows[0];
-  if (!l) return res.sendStatus(404);
-
-  const ok =
-    user.role === "ADMIN" ||
-    Number(l.shipper_id) === Number(user.id) ||
-    (l.booked_carrier_id && Number(l.booked_carrier_id) === Number(user.id));
-  if (!ok) return res.sendStatus(403);
-
-  await pool.query(
-    `INSERT INTO documents (scope, load_id, uploaded_by_user_id, category, filename, mimetype, bytes)
-     VALUES ('LOAD',$1,$2,$3,$4,$5,$6)`,
-    [loadId, user.id, category, file.originalname, file.mimetype || "application/octet-stream", file.buffer]
-  );
-
-  res.redirect(`/loads/${loadId}/documents`);
-});
-
-// View BOL stored in load_files (existing table)
-app.get("/loads/:loadId/bol/:fileId", requireAuth, async (req, res) => {
-  const user = req.user;
-  const loadId = Number(req.params.loadId);
-  const fileId = Number(req.params.fileId);
-
-  const l = (await pool.query(`SELECT shipper_id, booked_carrier_id FROM loads WHERE id=$1`, [loadId])).rows[0];
-  if (!l) return res.sendStatus(404);
-  const ok =
-    user.role === "ADMIN" ||
-    Number(l.shipper_id) === Number(user.id) ||
-    (l.booked_carrier_id && Number(l.booked_carrier_id) === Number(user.id));
-  if (!ok) return res.sendStatus(403);
-
-  const f = (await pool.query(`SELECT * FROM load_files WHERE id=$1 AND load_id=$2`, [fileId, loadId])).rows[0];
-  if (!f) return res.sendStatus(404);
-
-  res.setHeader("Content-Type", f.mimetype || "application/octet-stream");
-  res.setHeader("Content-Disposition", `inline; filename="${String(f.filename || "bol").replaceAll('"', "")}"`);
-  res.send(f.bytes);
 });
 
 /* --------------------- SHIPPER PLANS + STRIPE --------------------- */
