@@ -239,35 +239,16 @@ function planFromPriceId(priceId) {
 /* --------------------- AUTH --------------------- */
 function signIn(res, user) {
   const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: "7d" });
-  res.cookie("dfx_token", token, { httpOnly: true, sameSite: "lax", secure: true });
-}
-function getUser(req) {
-  try {
-    const t = req.cookies?.dfx_token;
-    if (!t) return null;
-    return jwt.verify(t, JWT_SECRET);
-  } catch {
-    return null;
-  }
-}
-function requireAuth(req, res, next) {
-  const u = getUser(req);
-  if (!u) return res.redirect("/login");
-  req.user = u;
-  next();
-}
-function requireRole(role) {
-  return (req, res, next) => {
-    // Always populate req.user (even if a route forgot requireAuth)
-    if (!req.user) {
-      const u = getUser(req);
-      if (!u) return res.redirect("/login");
-      req.user = u;
-    }
 
-    if (req.user.role !== role) return res.sendStatus(403);
-    next();
-  };
+  const isProd = process.env.NODE_ENV === "production";
+
+  res.cookie("dfx_token", token, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: isProd, // secure only on production (Render). localhost needs false.
+    path: "/",
+    maxAge: 1000 * 60 * 60 * 24 * 7,
+  });
 }
 
 /* --------------------- EMAIL --------------------- */
