@@ -258,7 +258,13 @@ function requireAuth(req, res, next) {
 }
 function requireRole(role) {
   return (req, res, next) => {
-    if (!req.user) return res.redirect("/login");
+    // Always populate req.user (even if a route forgot requireAuth)
+    if (!req.user) {
+      const u = getUser(req);
+      if (!u) return res.redirect("/login");
+      req.user = u;
+    }
+
     if (req.user.role !== role) return res.sendStatus(403);
     next();
   };
