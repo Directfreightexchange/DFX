@@ -21,3 +21,4 @@
     "node": "22.x"
   }
 }
+npm install pdfkit
