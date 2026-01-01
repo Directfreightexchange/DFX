@@ -48,21 +48,75 @@ if (!DATABASE_URL) return bootFail("Missing DATABASE_URL");
 if (!JWT_SECRET) return bootFail("Missing JWT_SECRET");
 
 /* --------------------- MIDDLEWARE --------------------- */
-// Stripe webhook MUST be raw body
+/* --------------------- STRIPE WEBHOOK (must be raw body) --------------------- */
+async function stripeWebhookHandler(req, res) {
+  if (!stripeEnabled) return res.sendStatus(400);
+
+  let event;
+  try {
+    const sig = req.headers["stripe-signature"];
+    event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
+  } catch (err) {
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  try {
+    if (event.type === "checkout.session.completed") {
+      const session = event.data.object;
+      const shipperId = Number(session.metadata?.shipper_id);
+      const customerId = session.customer;
+      const subscriptionId = session.subscription;
+
+      if (shipperId && subscriptionId) {
+        const sub = await stripe.subscriptions.retrieve(subscriptionId);
+        const priceId = sub.items?.data?.[0]?.price?.id;
+        await upsertBillingFromSubscription({
+          shipperId,
+          customerId,
+          subscriptionId,
+          subStatus: sub.status,
+          priceId,
+        });
+      }
+    }
+
+    if (
+      event.type === "customer.subscription.created" ||
+      event.type === "customer.subscription.updated" ||
+      event.type === "customer.subscription.deleted"
+    ) {
+      const sub = event.data.object;
+      const subscriptionId = sub.id;
+      const customerId = sub.customer;
+      const priceId = sub.items?.data?.[0]?.price?.id;
+
+      const row = await pool.query(`SELECT shipper_id FROM shippers_billing WHERE stripe_subscription_id=$1`, [
+        subscriptionId,
+      ]);
+      const shipperId =
+        row.rows[0]?.shipper_id ||
+        (await pool.query(`SELECT shipper_id FROM shippers_billing WHERE stripe_customer_id=$1`, [customerId])).rows[0]
+          ?.shipper_id;
+
+      if (shipperId) {
+        await upsertBillingFromSubscription({
+          shipperId,
+          customerId,
+          subscriptionId,
+          subStatus: sub.status,
+          priceId,
+        });
+      }
+    }
+
+    res.json({ received: true });
+  } catch (e) {
+    console.error("Webhook handler failed:", e);
+    res.sendStatus(500);
+  }
+}
+
 app.post("/stripe/webhook", express.raw({ type: "application/json" }), stripeWebhookHandler);
-
-// normal parsers
-app.use(express.json({ limit: "2mb" }));
-app.use(express.urlencoded({ extended: true }));
-app.use(cookieParser());
-
-app.use((req, res, next) => {
-  res.setHeader("X-Content-Type-Options", "nosniff");
-  res.setHeader("X-Frame-Options", "DENY");
-  res.setHeader("Referrer-Policy", "no-referrer");
-  res.setHeader("Permissions-Policy", "geolocation=(), microphone=(), camera=()");
-  next();
-});
 
 /* --------------------- DB --------------------- */
 const pool = new Pool({
