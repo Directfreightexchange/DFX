@@ -1464,7 +1464,46 @@ app.get("/contracts", (req, res) => {
 
         ${'${pdfEnabled ? "" : `<div class="divider"></div><div class="badge badgeWarn">${icon("tag")} To enable PDF downloads: run <span class="mono">npm install pdfkit</span>, commit <span class="mono">package.json</span> + <span class="mono">package-lock.json</span>, and redeploy.</div>`}'}
       </div>
-    `
+    
+        <div class="divider"></div>
+
+        <div class="grid2">
+          <div class="feature">
+            <div class="featureTop">
+              <div class="featureIcon">${icon("clipboard")}</div>
+              <div>
+                <div class="featureTitle">Shipper ↔ Carrier Load Agreement (Template)</div>
+                <div class="small">Plain-language contract you can download and edit</div>
+              </div>
+            </div>
+            <div class="featureText">
+              Covers scope, payment terms, accessorials, detention, insurance, and claims. Download the editable version or open the print-friendly version.
+            </div>
+            <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap">
+              <a class="btn btnPrimary" href="/contracts/shipper-carrier.txt" download>Download template (.txt)</a>
+              <a class="btn btnGhost" href="/contracts/shipper-carrier.html" target="_blank" rel="noopener noreferrer">Open print version</a>
+            </div>
+            <div class="small" style="margin-top:8px">Tip: Open the print version and use your browser’s <b>Print → Save as PDF</b> if you want a PDF copy.</div>
+          </div>
+
+          <div class="feature">
+            <div class="featureTop">
+              <div class="featureIcon">${icon("tag")}</div>
+              <div>
+                <div class="featureTitle">Rate Confirmation (Generated on booking)</div>
+                <div class="small">Auto-filled from the booked load</div>
+              </div>
+            </div>
+            <div class="featureText">
+              After a shipper accepts a carrier request, DFX generates a clean rate confirmation for that booked load. Open it from your <b>Booked loads</b> section and <b>Print / Save as PDF</b>.
+            </div>
+            <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap">
+              <a class="btn btnPrimary" href="/dashboard">Go to Dashboard</a>
+              <a class="btn btnGhost" href="/how-it-works">How it works</a>
+            </div>
+          </div>
+        </div>
+`
   }));
 });
 
