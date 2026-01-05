@@ -795,6 +795,7 @@ input:focus,select:focus,textarea:focus{border-color:rgba(34,197,94,.55)}
       <a class="linkPill" href="/loads">${icon("search")} Load Board</a>
       <a class="linkPill" href="/features">${icon("tag")} Pricing & Features</a>
       <a class="linkPill" href="/contracts">${icon("clipboard")} Contracts</a>
+      ${user ? `<a class="linkPill" href="/documents">${icon("clipboard")} Documents</a>` : ``}
       <a class="linkPill" href="/about">${icon("spark")} About</a>
     </div>
 
@@ -1417,6 +1418,289 @@ app.get("/contracts", (req, res) => {
       </div>
     `
   }));
+});
+
+
+/* --------------------- DOCUMENTS (VISIBLE PAPERWORK) --------------------- */
+// Carrier self-view of their uploaded compliance docs
+app.get("/carrier/file/:kind", requireAuth, requireRole("CARRIER"), async (req, res) => {
+  const kind = String(req.params.kind || "").toUpperCase();
+  if (!["W9", "COI", "AUTHORITY"].includes(kind)) return res.status(400).send("Invalid file kind.");
+
+  const r = await pool.query(
+    `SELECT filename, mimetype, bytes FROM carrier_files WHERE carrier_id=$1 AND kind=$2`,
+    [req.user.id, kind]
+  );
+  const f = r.rows[0];
+  if (!f) return res.status(404).send("File not found.");
+
+  res.setHeader("Content-Type", f.mimetype || "application/octet-stream");
+  res.setHeader("Content-Disposition", `inline; filename="${String(f.filename || "file").replaceAll('"', "")}"`);
+  res.send(f.bytes);
+});
+
+// Download a load file (BOL/POD/etc.) with access control
+app.get("/documents/load-file/:id", requireAuth, async (req, res) => {
+  const fileId = Number(req.params.id);
+  const r = await pool.query(
+    `SELECT lf.id, lf.load_id, lf.filename, lf.mimetype, lf.bytes, lf.uploaded_by_user_id,
+            l.shipper_id, l.booked_carrier_id
+     FROM load_files lf
+     JOIN loads l ON l.id = lf.load_id
+     WHERE lf.id=$1`,
+    [fileId]
+  );
+  const f = r.rows[0];
+  if (!f) return res.status(404).send("File not found.");
+
+  const u = req.user;
+  const ok =
+    u.role === "ADMIN" ||
+    Number(f.shipper_id) === Number(u.id) ||
+    (f.booked_carrier_id && Number(f.booked_carrier_id) === Number(u.id)) ||
+    Number(f.uploaded_by_user_id) === Number(u.id);
+
+  if (!ok) return res.sendStatus(403);
+
+  res.setHeader("Content-Type", f.mimetype || "application/octet-stream");
+  res.setHeader("Content-Disposition", `attachment; filename="${String(f.filename || "file").replaceAll('"', "")}"`);
+  res.send(f.bytes);
+});
+
+// Documents hub (carrier + shipper)
+app.get("/documents", requireAuth, async (req, res) => {
+  const user = req.user;
+
+  // Carrier view
+  if (user.role === "CARRIER") {
+    const c = (await pool.query(`SELECT * FROM carriers_compliance WHERE carrier_id=$1`, [user.id])).rows[0] || { status: "PENDING" };
+    const docs = await pool.query(
+      `SELECT kind, filename, uploaded_at FROM carrier_files WHERE carrier_id=$1 ORDER BY uploaded_at DESC`,
+      [user.id]
+    );
+
+    const bookedLoads = await pool.query(
+      `SELECT * FROM loads WHERE booked_carrier_id=$1 ORDER BY created_at DESC LIMIT 200`,
+      [user.id]
+    );
+
+    const loadFileRows = bookedLoads.rows.length
+      ? (await pool.query(
+          `SELECT lf.*, u.email as uploaded_by_email
+           FROM load_files lf
+           JOIN users u ON u.id = lf.uploaded_by_user_id
+           WHERE lf.load_id = ANY($1::int[])
+           ORDER BY lf.uploaded_at DESC`,
+          [bookedLoads.rows.map(x => x.id)]
+        )).rows
+      : [];
+
+    const filesByLoad = new Map();
+    for (const f of loadFileRows) {
+      const k = Number(f.load_id);
+      if (!filesByLoad.has(k)) filesByLoad.set(k, []);
+      filesByLoad.get(k).push(f);
+    }
+
+    const body = `
+      <div class="section">
+        <div class="spread">
+          <div>
+            <h2 style="margin:0">Documents</h2>
+            <div class="muted" style="margin-top:8px;line-height:1.6;max-width:980px">
+              Everything lives inside DFX: compliance docs, BOLs, and audit trail.
+            </div>
+          </div>
+          <span class="badge ${c.status === "APPROVED" ? "badgeOk" : "badgeWarn"}">${icon("shield")} Verification: ${escapeHtml(c.status)}</span>
+        </div>
+
+        <div class="divider"></div>
+
+        <h3 style="margin:0">Your compliance docs</h3>
+        <div class="small muted" style="margin-top:6px">W‑9 • COI • Authority (view/download anytime)</div>
+
+        <div class="divider"></div>
+
+        <div class="grid3">
+          ${["W9","COI","AUTHORITY"].map(k => {
+            const row = docs.rows.find(x => String(x.kind).toUpperCase() === k);
+            const label = k === "W9" ? "W‑9" : k === "COI" ? "COI" : "Authority";
+            const ok = !!row;
+            const href = ok ? `/carrier/file/${k}` : "#";
+            return `
+              <div class="feature">
+                <div class="featureTop">
+                  <div class="featureIcon">${icon("clipboard")}</div>
+                  <div>
+                    <div class="featureTitle">${label}</div>
+                    <div class="small">${ok ? escapeHtml(row.filename) : "Not uploaded yet"}</div>
+                  </div>
+                </div>
+                <div class="divider"></div>
+                ${ok
+                  ? `<a class="btn btnPrimary" target="_blank" href="${href}">Open</a>
+                     <div class="small" style="margin-top:8px">Uploaded: ${escapeHtml(new Date(row.uploaded_at).toISOString().slice(0,10))}</div>`
+                  : `<div class="badge badgeWarn">${icon("tag")} Upload in Dashboard → “Submit documents”</div>`
+                }
+              </div>
+            `;
+          }).join("")}
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="spread">
+          <div>
+            <h2 style="margin:0">Booked load documents</h2>
+            <div class="muted" style="margin-top:8px">Upload BOLs and keep a searchable record per load.</div>
+          </div>
+        </div>
+        <div class="divider"></div>
+
+        ${bookedLoads.rows.length ? bookedLoads.rows.map(l => {
+          const files = filesByLoad.get(Number(l.id)) || [];
+          const fileList = files.length ? files.map(f => `
+            <div class="chip">
+              ${escapeHtml(f.kind)} • <a href="/documents/load-file/${f.id}">${escapeHtml(f.filename)}</a>
+              <span class="small muted"> • uploaded by ${escapeHtml(f.uploaded_by_email)} • ${escapeHtml(new Date(f.uploaded_at).toISOString().slice(0,10))}</span>
+            </div>
+          `).join("") : `<div class="muted">No files uploaded yet.</div>`;
+
+          return `
+            <div class="loadCard">
+              <div class="loadTop">
+                <div>
+                  <div class="lane">#${l.id} ${escapeHtml(l.lane_from)} → ${escapeHtml(l.lane_to)}</div>
+                  <div class="muted">${escapeHtml(l.pickup_date)} → ${escapeHtml(l.delivery_date)} • ${escapeHtml(l.equipment)} • ${int(l.miles).toLocaleString()} mi</div>
+                  <div class="chips" style="margin-top:10px">${fileList}</div>
+
+                  <div class="divider"></div>
+
+                  <form method="POST" action="/carrier/loads/${l.id}/bol" enctype="multipart/form-data" class="formGrid">
+                    <div class="twoCol">
+                      <input type="file" name="bol" accept="application/pdf,image/*" required />
+                      <button class="btn btnPrimary" type="submit">${icon("bolt")} Upload BOL</button>
+                    </div>
+                    <div class="small">Accepted: PDF or image. Stored inside DFX.</div>
+                  </form>
+                </div>
+              </div>
+            </div>
+          `;
+        }).join("") : `<div class="muted">No booked loads yet.</div>`}
+      </div>
+    `;
+
+    return res.send(layout({ title: "Documents", user, body }));
+  }
+
+  // Shipper view
+  if (user.role === "SHIPPER") {
+    const myLoads = await pool.query(`SELECT * FROM loads WHERE shipper_id=$1 ORDER BY created_at DESC LIMIT 250`, [user.id]);
+
+    const loadIds = myLoads.rows.map(r => r.id);
+    const files = loadIds.length
+      ? await pool.query(
+          `SELECT lf.*, u.email AS uploaded_by_email
+           FROM load_files lf
+           JOIN users u ON u.id = lf.uploaded_by_user_id
+           WHERE lf.load_id = ANY($1::int[])
+           ORDER BY lf.uploaded_at DESC`,
+          [loadIds]
+        )
+      : { rows: [] };
+
+    const filesByLoad = new Map();
+    for (const f of files.rows) {
+      const k = Number(f.load_id);
+      if (!filesByLoad.has(k)) filesByLoad.set(k, []);
+      filesByLoad.get(k).push(f);
+    }
+
+    const body = `
+      <div class="section">
+        <div class="spread">
+          <div>
+            <h2 style="margin:0">Documents</h2>
+            <div class="muted" style="margin-top:8px;line-height:1.6;max-width:980px">
+              Rate confirmations, BOLs, and an audit trail per load — all visible inside DFX.
+            </div>
+          </div>
+          <a class="btn btnGhost" href="/dashboard">${icon("home")} Back to dashboard</a>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="spread">
+          <div>
+            <h2 style="margin:0">Load documents</h2>
+            <div class="muted" style="margin-top:8px">Open rate confirmations (booked loads) and download uploaded paperwork.</div>
+          </div>
+        </div>
+        <div class="divider"></div>
+
+        ${myLoads.rows.length ? myLoads.rows.map(l => {
+          const lfiles = filesByLoad.get(Number(l.id)) || [];
+          const bolList = lfiles.length ? lfiles.map(f => `
+            <div class="chip">
+              ${escapeHtml(f.kind)} • <a href="/documents/load-file/${f.id}">${escapeHtml(f.filename)}</a>
+              <span class="small muted"> • uploaded by ${escapeHtml(f.uploaded_by_email)} • ${escapeHtml(new Date(f.uploaded_at).toISOString().slice(0,10))}</span>
+            </div>
+          `).join("") : `<div class="muted">No files uploaded yet.</div>`;
+
+          return `
+            <div class="loadCard">
+              <div class="loadTop">
+                <div>
+                  <div class="lane">#${l.id} ${escapeHtml(l.lane_from)} → ${escapeHtml(l.lane_to)}</div>
+                  <div class="muted">${escapeHtml(l.pickup_date)} → ${escapeHtml(l.delivery_date)} • Status: ${escapeHtml(l.status)}</div>
+                  <div class="chips" style="margin-top:10px">
+                    <span class="chip chipStrong">${escapeHtml(l.equipment)}</span>
+                    <span class="chip mono">${int(l.miles).toLocaleString()} mi</span>
+                    <span class="chip mono">${int(l.weight_lbs).toLocaleString()} lbs</span>
+                    <span class="chip">Terms: ${escapeHtml(l.payment_terms)}${l.quickpay_available ? " • QuickPay" : ""}</span>
+                  </div>
+
+                  <div class="divider"></div>
+
+                  <div style="display:flex;gap:10px;flex-wrap:wrap">
+                    ${l.status === "BOOKED"
+                      ? `<a class="btn btnPrimary" target="_blank" href="/shipper/loads/${l.id}/rate-confirmation">Open rate confirmation</a>`
+                      : `<span class="badge badgeWarn">${icon("tag")} Rate confirmation available after booking</span>`
+                    }
+                    <a class="btn btnGhost" href="/loads">${icon("search")} View load board</a>
+                  </div>
+
+                  <div class="divider"></div>
+                  <div class="muted" style="margin-bottom:8px">Uploaded paperwork</div>
+                  <div class="chips">${bolList}</div>
+                </div>
+                <div style="text-align:right">
+                  <div style="font-weight:1000;font-size:18px">${money(l.rate_all_in)}</div>
+                  <div class="small mono">RPM: ${rpm(l.rate_all_in, l.miles) ? `$${rpm(l.rate_all_in, l.miles).toFixed(2)}` : "—"}</div>
+                </div>
+              </div>
+            </div>
+          `;
+        }).join("") : `<div class="muted">No loads yet.</div>`}
+      </div>
+    `;
+
+    return res.send(layout({ title: "Documents", user, body }));
+  }
+
+  // Admin view (simple hub)
+  const body = `
+    <div class="section">
+      <h2 style="margin:0">Documents</h2>
+      <div class="muted" style="margin-top:8px;line-height:1.6;max-width:980px">
+        Admins can review carrier files from the Admin dashboard. Use the carrier verification list to open W‑9/COI/Authority.
+      </div>
+      <div class="divider"></div>
+      <a class="btn btnPrimary" href="/dashboard">${icon("shield")} Go to Admin dashboard</a>
+    </div>
+  `;
+  return res.send(layout({ title: "Documents", user, body }));
 });
 
 app.get("/contracts/shipper-carrier.txt", (_req, res) => {
