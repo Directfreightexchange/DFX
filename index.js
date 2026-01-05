@@ -30,6 +30,7 @@ const DATABASE_URL = process.env.DATABASE_URL;
 const JWT_SECRET = process.env.JWT_SECRET;
 const APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;
 const BOOTSTRAP_ADMIN_EMAIL = String(process.env.BOOTSTRAP_ADMIN_EMAIL || "").trim().toLowerCase();
+const ADMIN_CREATE_SECRET = String(process.env.ADMIN_CREATE_SECRET || "");
 
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY; // sk_...
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET; // whsec_...
@@ -460,8 +461,8 @@ function layout({ title, user, body, extraHead = "", extraScript = "" }) {
     : "";
 
   const topCta = user
-    ? `<a class="btn btnPrimary" href="/dashboard">Dashboard</a><a class="btn btnGhost" href="/logout">Logout</a>`
-    : `<a class="btn btnGhost" href="/login">Login</a><a class="btn btnPrimary" href="/signup">Get Started</a>`;
+    ? `<a class="btn btnPrimary" href="/dashboard">${user.role === "ADMIN" ? "Admin" : "Dashboard"}</a><a class="btn btnGhost" href="/logout">Logout</a>`
+    : `<a class="btn btnGhost" href="/login">Login</a><a class="btn btnPrimary" href="/signup">Get Started</a><a class="btn btnGhost" href="/admin/login">Admin Login</a><a class="btn btnGhost" href="/admin/create">Create Admin</a>`;
 
   return `<!doctype html>
 <html>
@@ -2196,6 +2197,119 @@ app.post("/login", async (req, res) => {
     res.status(500).send("Login failed.");
   }
 });
+
+app.get("/admin/login", (req, res) => {
+  const user = getUser(req);
+  if (user?.role === "ADMIN") return res.redirect("/dashboard");
+  res.send(layout({
+    title: "Admin Login",
+    user,
+    body: `
+      <div class="section">
+        <div class="spread">
+          <div>
+            <h2 style="margin:0">Admin Login</h2>
+            <div class="muted" style="margin-top:8px">Admins can approve carriers, review documents, and oversee the marketplace.</div>
+          </div>
+          <a class="btn btnGhost" href="/login">User login</a>
+        </div>
+
+        <div class="divider"></div>
+
+        <form method="POST" action="/admin/login" class="formGrid">
+          <div class="twoCol">
+            <input name="email" type="email" placeholder="Admin email" required />
+            <input name="password" type="password" placeholder="Password" required />
+          </div>
+          <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <button class="btn btnPrimary" type="submit">Login as Admin</button>
+            <a class="btn btnGhost" href="/">Home</a>
+          </div>
+        </form>
+      </div>
+    `
+  }));
+});
+
+app.post("/admin/login", async (req, res) => {
+  try {
+    const email = safeLower(req.body.email);
+    const password = String(req.body.password || "");
+    const r = await pool.query("SELECT id,email,password_hash,role FROM users WHERE email=$1", [email]);
+    const u = r.rows[0];
+    if (!u) return res.status(401).send("No account found.");
+    const ok = await bcrypt.compare(password, u.password_hash);
+    if (!ok) return res.status(401).send("Wrong password.");
+    if (u.role !== "ADMIN") return res.status(403).send("This account is not an admin.");
+    signIn(res, u);
+    res.redirect("/dashboard");
+  } catch (e) {
+    console.error(e);
+    res.status(500).send("Admin login failed.");
+  }
+});
+
+app.get("/admin/create", (req, res) => {
+  const user = getUser(req);
+  res.send(layout({
+    title: "Create Admin",
+    user,
+    body: `
+      <div class="section">
+        <div class="spread">
+          <div>
+            <h2 style="margin:0">Create Admin</h2>
+            <div class="muted" style="margin-top:8px;line-height:1.6;max-width:980px">
+              Use your <span class="mono">ADMIN_CREATE_SECRET</span> to bootstrap an admin account.
+            </div>
+          </div>
+          <a class="btn btnGhost" href="/admin/login">Admin login</a>
+        </div>
+
+        <div class="divider"></div>
+
+        <form method="POST" action="/admin/create" class="formGrid">
+          <div class="twoCol">
+            <input name="email" type="email" placeholder="Admin email" required />
+            <input name="password" type="password" placeholder="Password (min 8 chars)" minlength="8" required />
+          </div>
+          <div class="twoCol">
+            <input name="secret" type="password" placeholder="ADMIN_CREATE_SECRET" required />
+            <button class="btn btnPrimary" type="submit">Create Admin</button>
+          </div>
+          <div class="small">
+            This endpoint is protected by your secret. If you don't want it visible, remove the button in the nav after you're bootstrapped.
+          </div>
+        </form>
+      </div>
+    `
+  }));
+});
+
+app.post("/admin/create", async (req, res) => {
+  try {
+    const email = safeLower(req.body.email);
+    const password = String(req.body.password || "");
+    const secret = String(req.body.secret || "");
+    if (!ADMIN_CREATE_SECRET) return res.status(400).send("ADMIN_CREATE_SECRET is not set.");
+    if (secret !== ADMIN_CREATE_SECRET) return res.status(403).send("Invalid secret.");
+    if (!email || password.length < 8) return res.status(400).send("Invalid email/password.");
+
+    const hash = await bcrypt.hash(password, 12);
+    const r = await pool.query(
+      "INSERT INTO users (email, password_hash, role) VALUES ($1,$2,'ADMIN') RETURNING id,email,role",
+      [email, hash]
+    );
+    const admin = r.rows[0];
+    signIn(res, admin);
+    res.redirect("/dashboard");
+  } catch (e) {
+    if (String(e).toLowerCase().includes("duplicate")) return res.status(409).send("Email already exists. Try /admin/login.");
+    console.error(e);
+    res.status(500).send("Create admin failed.");
+  }
+});
+
 
 app.get("/logout", (req, res) => { res.clearCookie("dfx_token"); res.redirect("/"); });
 
