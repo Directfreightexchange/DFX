@@ -9,22 +9,16 @@ const multer = require("multer");
 const Stripe = require("stripe");
 const nodemailer = require("nodemailer");
 
+// Optional: PDF generation (contracts / paperwork)
+let PDFDocument = null;
+try {
+  // eslint-disable-next-line global-require
+  PDFDocument = require("pdfkit");
+} catch {
+  PDFDocument = null;
+}
+
 const app = express();
-
-// --- DFX LOGO (SVG) ---
-app.get("/logo.svg", (req, res) => {
-  res.type("image/svg+xml").send(`
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 120">
-  <g fill="none" stroke="#000" stroke-width="8">
-    <path d="M20 70 C80 20, 200 20, 300 50" />
-    <rect x="300" y="45" width="90" height="35" rx="6"/>
-    <circle cx="320" cy="85" r="10"/>
-    <circle cx="370" cy="85" r="10"/>
-  </g>
-  <text x="20" y="105" font-size="36" font-family="Arial Black, Arial" fill="#000">DFX</text>
-</svg>`);
-});
-
 
 /* --------------------- CONFIG --------------------- */
 app.set("trust proxy", 1);
@@ -135,6 +129,147 @@ const EQUIPMENT_OPTIONS = [
   "Oversize / Permitted",
   "Other",
 ];
+
+
+
+/* --------------------- CONTRACT TEMPLATES --------------------- */
+const CONTRACT_TEMPLATES = {
+  SHIPPER_CARRIER: {
+    id: "shipper-carrier",
+    title: "Shipper ↔ Carrier Load Agreement (Template)",
+    filename: "DFX_Shipper-Carrier_Load_Agreement.pdf",
+    text: [
+      "DIRECT FREIGHT EXCHANGE (DFX)",
+      "SHIPPER ↔ CARRIER LOAD AGREEMENT (TEMPLATE)",
+      "",
+      "1) Parties",
+      "Shipper: ________________________________",
+      "Carrier: ________________________________  MC/DOT: ____________________",
+      "",
+      "2) Scope",
+      "Carrier will transport the shipment(s) described in the rate confirmation or load posting accepted by Shipper.",
+      "",
+      "3) Rate & Payment Terms",
+      "• All-in rate: per rate confirmation / booking record.",
+      "• Payment terms: _________ (e.g., NET 30). QuickPay (if offered): ________.",
+      "• Carrier must submit legible POD/BOL and any required receipts within ____ days of delivery.",
+      "",
+      "4) Accessorials & Detention",
+      "• Accessorials must be disclosed/approved in writing (email or platform notes) before billing.",
+      "• Detention: $______/hr after ____ hours, if documented (arrival time, check-in, release).",
+      "",
+      "5) Appointment / FCFS",
+      "Pickup/Delivery appointment requirements will be shown on the rate confirmation or booking record.",
+      "",
+      "6) Cargo Liability & Claims",
+      "Carrier is responsible for loss/damage while in its possession, except for shipper-loaded/sealed shipments as noted.",
+      "Claims must be reported within ____ hours of delivery with supporting photos/documents.",
+      "",
+      "7) Insurance & Authority",
+      "Carrier represents it maintains valid operating authority and insurance (Auto Liability + Cargo) during service.",
+      "",
+      "8) Compliance",
+      "Carrier will comply with all applicable FMCSA/DOT rules, hours of service, and safety requirements.",
+      "",
+      "9) Confidentiality / Non-solicit (optional)",
+      "Parties may mutually agree not to solicit each other's customers/carriers for ____ months. (Optional)",
+      "",
+      "10) Governing Law",
+      "State of ____________.",
+      "",
+      "SIGNATURES",
+      "Shipper Authorized: ________________________  Date: ____________",
+      "Carrier Authorized: ________________________  Date: ____________",
+      "",
+      "This is a template provided for convenience and does not constitute legal advice."
+    ],
+  },
+
+  CARRIER_PACKET: {
+    id: "carrier-packet",
+    title: "Carrier Packet Checklist",
+    filename: "DFX_Carrier_Packet_Checklist.pdf",
+    text: [
+      "DIRECT FREIGHT EXCHANGE (DFX)",
+      "CARRIER PACKET CHECKLIST",
+      "",
+      "Required Documents",
+      "□ W-9 (completed, signed)",
+      "□ Certificate of Insurance (Auto Liability + Cargo) with current limits and effective dates",
+      "□ Operating Authority (MC/DOT proof)",
+      "",
+      "Company / Contacts",
+      "□ Dispatch contact (name, email, phone)",
+      "□ After-hours contact",
+      "□ Accounting / billing contact",
+      "",
+      "Payment / Banking (if applicable)",
+      "□ Remit-to address",
+      "□ ACH details (bank name, routing, account) or factoring notice",
+      "□ QuickPay request process (if offered)",
+      "",
+      "Operational Notes",
+      "□ Preferred lanes / equipment",
+      "□ Tracking method (phone check calls / ELD link / GPS)",
+      "□ Safety notes / exclusions",
+      "",
+      "Submission",
+      "Upload W-9 / COI / Authority in the Carrier Dashboard → Verification section.",
+      "For booked loads, upload BOL/POD under the Load Documents section."
+    ],
+  },
+};
+
+function buildPdf(res, { title, filename, lines }) {
+  if (!PDFDocument) {
+    res.status(500).send(
+      "PDF generation is not enabled. Install pdfkit: `npm install pdfkit` and redeploy."
+    );
+    return;
+  }
+
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `inline; filename="${filename}"`);
+
+  const doc = new PDFDocument({ size: "LETTER", margin: 54 });
+  doc.info.Title = title;
+
+  doc.pipe(res);
+
+  // Simple, clean formatting
+  doc.font("Helvetica-Bold").fontSize(18).text("Direct Freight Exchange (DFX)", { align: "left" });
+  doc.moveDown(0.3);
+  doc.font("Helvetica").fontSize(10).fillColor("#444").text("Generated from DFX templates. Customize to your needs.", { align: "left" });
+  doc.moveDown(1);
+
+  doc.fillColor("#111").font("Helvetica-Bold").fontSize(16).text(title);
+  doc.moveDown(0.8);
+
+  doc.font("Helvetica").fontSize(11);
+  for (const line of lines) {
+    const isHeading = /^[0-9]+\)|^Required Documents$|^Company \/ Contacts$|^Payment \/ Banking|^Operational Notes$|^SIGNATURES$/.test(line.trim());
+    if (!line.trim()) {
+      doc.moveDown(0.55);
+      continue;
+    }
+    if (isHeading) {
+      doc.moveDown(0.2);
+      doc.font("Helvetica-Bold").text(line);
+      doc.font("Helvetica");
+      doc.moveDown(0.25);
+    } else {
+      doc.text(line, { lineGap: 2 });
+    }
+  }
+
+  doc.moveDown(1.2);
+  doc.fontSize(9).fillColor("#666").text(
+    "Template only. Not legal advice. Verify terms, insurance, and compliance for your operations.",
+    { align: "left" }
+  );
+
+  doc.end();
+}
 
 /* --------------------- HELPERS --------------------- */
 function escapeHtml(s) {
@@ -1212,6 +1347,13 @@ app.get("/privacy", (req, res) => {
 
 app.get("/contracts", (req, res) => {
   const user = getUser(req);
+  const pdfEnabled = !!PDFDocument;
+
+  const shipperHref = "/contracts/shipper-carrier.pdf";
+  const shipperTxt = "/contracts/shipper-carrier.txt";
+  const carrierHref = "/contracts/carrier-packet.pdf";
+  const carrierTxt = "/contracts/carrier-packet.txt";
+
   res.send(layout({
     title: "Contracts",
     user,
@@ -1221,10 +1363,12 @@ app.get("/contracts", (req, res) => {
           <div>
             <h2 style="margin:0">Pre‑built contracts</h2>
             <div class="muted" style="margin-top:8px;line-height:1.6;max-width:980px">
-              Use these templates as a starting point. You should still review with your team and counsel for your specific lanes and customers.
+              Download clean, ready‑to‑use templates. Customize the blanks to match your operation.
             </div>
           </div>
-          <div class="badge badgeOk">${icon("clipboard")} Ready to use</div>
+          <div class="badge ${'${pdfEnabled ? "badgeOk" : "badgeWarn"}'}">${'${icon("clipboard")}'}
+            ${'${pdfEnabled ? "PDF downloads enabled" : "PDF downloads not enabled (install pdfkit)"}'}
+          </div>
         </div>
 
         <div class="divider"></div>
@@ -1233,57 +1377,248 @@ app.get("/contracts", (req, res) => {
           <div class="feature">
             <div class="featureTitle">Shipper ↔ Carrier Load Agreement (Template)</div>
             <div class="featureText">
-              A simple, plain‑language template covering scope, payment terms, accessorials, detention, and claims.
-              <div style="margin-top:12px" class="small">Coming soon: downloadable PDF/DOCX built into the app.</div>
+              Plain‑language template covering scope, payment terms, accessorials, detention, insurance, and claims.
+              <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap">
+                <a class="btn btnPrimary" href="${'${shipperHref}'}" target="_blank">Download PDF</a>
+                <a class="btn btnGhost" href="${'${shipperTxt}'}" target="_blank">View text</a>
+              </div>
             </div>
           </div>
 
           <div class="feature">
             <div class="featureTitle">Carrier Packet Checklist</div>
             <div class="featureText">
-              W‑9 • COI • Authority • banking info • contact roles • safety notes. Use it to standardize onboarding.
-              <div style="margin-top:12px" class="small">Tip: carriers upload W‑9/COI/Authority in the dashboard.</div>
+              Standardize onboarding: W‑9 • COI • Authority • contacts • banking/factoring • operational notes.
+              <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap">
+                <a class="btn btnPrimary" href="${'${carrierHref}'}" target="_blank">Download PDF</a>
+                <a class="btn btnGhost" href="${'${carrierTxt}'}" target="_blank">View text</a>
+              </div>
+              <div style="margin-top:12px" class="small">Tip: carriers upload W‑9/COI/Authority in the dashboard for verification.</div>
             </div>
           </div>
 
           <div class="feature">
             <div class="featureTitle">Rate Confirmation (Generated on booking)</div>
             <div class="featureText">
-              DFX already generates an auto‑filled rate confirmation after a load is booked.
-              You can print/save as PDF from the booked load page.
+              DFX generates an auto‑filled rate confirmation after booking. Open it from a booked load and Print/Save as PDF.
             </div>
           </div>
 
           <div class="feature">
             <div class="featureTitle">Need a custom template?</div>
             <div class="featureText">
-              Email <a href="mailto:${escapeHtml(SUPPORT_EMAIL)}">${escapeHtml(SUPPORT_EMAIL)}</a> and tell us what you want standardized
-              (quickpay, fuel, lumper, tarp, appointment policy, etc.).
+              Email <a href="mailto:${'${escapeHtml(SUPPORT_EMAIL)}'}">${'${escapeHtml(SUPPORT_EMAIL)}'}</a> and tell us what you want standardized
+              (quickpay, fuel, lumper, tarp, appointment policy, claims language, etc.).
             </div>
           </div>
         </div>
+
+        ${'${pdfEnabled ? "" : `<div class="divider"></div><div class="badge badgeWarn">${icon("tag")} To enable PDF downloads: run <span class="mono">npm install pdfkit</span>, commit <span class="mono">package.json</span> + <span class="mono">package-lock.json</span>, and redeploy.</div>`}'}
       </div>
     `
   }));
 });
 
-/* --------------------- HOME --------------------- */
-
-app.get("/", (req, res) => {
-  const body = `
-    <section class="hero" style="text-align:center;padding:60px">
-      <img src="/logo.svg" style="width:300px;margin-bottom:30px"/>
-      <h1>Book Freight Direct.<br/>No Brokers. No Games.</h1>
-      <p>Transparent rates, verified carriers, and paperwork that lives inside DFX.</p>
-      <div style="margin-top:20px">
-        <a href="/signup">Post a Load (Shippers)</a> |
-        <a href="/loads">Find Loads (Carriers)</a>
-      </div>
-    </section>
-  `;
-  res.send(layout({ title: "Direct Freight Exchange", body }));
+app.get("/contracts/shipper-carrier.txt", (_req, res) => {
+  const t = CONTRACT_TEMPLATES.SHIPPER_CARRIER;
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  res.send(t.text.join("\n"));
+});
+app.get("/contracts/carrier-packet.txt", (_req, res) => {
+  const t = CONTRACT_TEMPLATES.CARRIER_PACKET;
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  res.send(t.text.join("\n"));
 });
 
+app.get("/contracts/shipper-carrier.pdf", (_req, res) => {
+  const t = CONTRACT_TEMPLATES.SHIPPER_CARRIER;
+  buildPdf(res, { title: t.title, filename: t.filename, lines: t.text });
+});
+app.get("/contracts/carrier-packet.pdf", (_req, res) => {
+  const t = CONTRACT_TEMPLATES.CARRIER_PACKET;
+  buildPdf(res, { title: t.title, filename: t.filename, lines: t.text });
+});
+/* --------------------- HOME --------------------- */
+app.get("/", (req, res) => {
+  const user = getUser(req);
+
+  const body = `
+    <div class="hero">
+      <div class="heroGrid">
+        <div>
+          <div class="badgeRow">
+            <span class="badge badgeOk">${icon("spark")} No broker games</span>
+            <span class="badge badgeOk">${icon("tag")} Transparent all-in pricing</span>
+            <span class="badge badgeOk">${icon("shield")} Verified carriers</span>
+            <span class="badge badgeOk">${icon("bolt")} Faster booking</span>
+          </div>
+
+          <h1 class="hTitle" style="margin-top:16px">
+            Book freight <span style="color:rgba(240,255,219,.95)">direct</span>.
+            <br/>Cut out the broker middleman.
+          </h1>
+
+          <div class="hLead">
+            ${escapeHtml(BRAND_PITCH)}
+            <br/><br/>
+            DFX is built for decision-makers: <b>clear terms upfront</b>, <b>carrier verification</b>,
+            and a workflow that moves faster without the back-and-forth.
+          </div>
+
+          <div class="divider"></div>
+
+          <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <a class="btn btnPrimary" href="${user ? "/dashboard" : "/signup"}">${user ? "Go to Dashboard" : "Create account"}</a>
+            <a class="btn btnGhost" href="/loads">${icon("search")} Browse Load Board</a>
+            <a class="btn btnGhost" href="/how-it-works">${icon("clipboard")} How it works</a>
+          </div>
+
+          <div class="divider"></div>
+
+          <div class="muted" style="max-width:980px;line-height:1.6">
+            <b>Why it’s different:</b> Most marketplaces hide the details until you call.
+            DFX requires details that matter: detention, accessorials, appointment type, and payment terms.
+            Carriers request loads only after verification approval — helping reduce risk for both sides.
+          </div>
+        </div>
+
+        <div class="kpiGrid">
+          <div class="kpi">
+            <div class="num">All-in terms</div>
+            <div class="lab">Rate, RPM, miles, weight, equipment, terms, detention & accessorials visible at a glance.</div>
+          </div>
+          <div class="kpi">
+            <div class="num">Verified carriers</div>
+            <div class="lab">W-9 • COI (Auto + Cargo) • Authority uploaded and reviewed before requesting loads.</div>
+          </div>
+          <div class="kpi">
+            <div class="num">Direct booking</div>
+            <div class="lab">Request → accept → booked with a printable rate confirmation after booking.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="spread">
+        <div>
+          <h2 style="margin:0">What you get</h2>
+          <div class="muted" style="margin-top:8px;line-height:1.6;max-width:960px">
+            A complete marketplace flow: post loads, request loads, book loads, and keep clean documentation.
+            Designed to look and feel like a real, production freight platform.
+          </div>
+        </div>
+        <a class="btn btnGhost" href="/features">${icon("tag")} Pricing & Features</a>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="grid3">
+        <div class="feature">
+          <div class="featureTop">
+            <div class="featureIcon">${icon("tag")}</div>
+            <div>
+              <div class="featureTitle">Transparent load details</div>
+              <div class="small">Stop guessing • stop calling</div>
+            </div>
+          </div>
+          <div class="featureText">
+            Carriers see the details that matter: all-in rate, RPM, miles, weight, equipment, payment terms,
+            detention policy, accessorials, appointment type, and requirements.
+          </div>
+        </div>
+
+        <div class="feature">
+          <div class="featureTop">
+            <div class="featureIcon">${icon("shield")}</div>
+            <div>
+              <div class="featureTitle">Verification + trust</div>
+              <div class="small">On-platform compliance flow</div>
+            </div>
+          </div>
+          <div class="featureText">
+            Carriers upload W-9, COI (Auto + Cargo), and authority proof. Admin approval unlocks load requests.
+            This helps reduce risk and improves professionalism.
+          </div>
+        </div>
+
+        <div class="feature">
+          <div class="featureTop">
+            <div class="featureIcon">${icon("clipboard")}</div>
+            <div>
+              <div class="featureTitle">Rate confirmations</div>
+              <div class="small">Auto-filled after booking</div>
+            </div>
+          </div>
+          <div class="featureText">
+            After a shipper accepts a request, DFX generates a clean, printable rate confirmation with
+            both sides filled in.
+          </div>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="grid2">
+        <div class="callout">
+          <h3>For shippers</h3>
+          <p>
+            Subscribe to post loads and book verified carriers directly. Built to reduce friction, improve speed,
+            and keep terms transparent — without broker layers.
+          </p>
+          <div style="margin-top:12px">
+            <a class="btn btnPrimary" href="${user?.role === "SHIPPER" ? "/shipper/plans" : "/signup"}">View shipper plans</a>
+          </div>
+        </div>
+
+        <div class="callout">
+          <h3>For carriers (free)</h3>
+          <p>
+            Carriers are free on DFX. Upload verification documents once, get approved, then request loads
+            with clear terms and less wasted time.
+          </p>
+          <div style="margin-top:12px">
+            <a class="btn btnPrimary" href="${user ? "/dashboard" : "/signup"}">Carrier signup</a>
+            <a class="btn btnGhost" href="/loads">Browse loads</a>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section sectionTight">
+      <div class="spread">
+        <div>
+          <h2 style="margin:0">FAQ</h2>
+          <div class="muted" style="margin-top:6px">Quick answers to common questions.</div>
+        </div>
+      </div>
+      <div class="divider"></div>
+
+      <div class="grid2">
+        <div class="feature">
+          <div class="featureTitle">Do carriers pay?</div>
+          <div class="featureText">No. Carrier accounts are free. Verification is required to request loads.</div>
+        </div>
+        <div class="feature">
+          <div class="featureTitle">Do shippers have to subscribe?</div>
+          <div class="featureText">Yes to post loads. Subscriptions are monthly and determine posting limits.</div>
+        </div>
+        <div class="feature">
+          <div class="featureTitle">What does “no broker games” mean?</div>
+          <div class="featureText">
+            It means fewer hidden details. Carriers see clear terms and requirements up front — not “call for rate.”
+          </div>
+        </div>
+        <div class="feature">
+          <div class="featureTitle">What documents are required for verification?</div>
+          <div class="featureText">W-9, COI (Auto Liability + Cargo), and Operating Authority (MC/DOT proof).</div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  res.send(layout({ title: "Home", user, body }));
+});
 
 /* --------------------- AUTH PAGES --------------------- */
 app.get("/signup", (req, res) => {
