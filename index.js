@@ -394,7 +394,25 @@ async function sendEmail(to, subject, html) {
   await t.sendMail({ from: SMTP_FROM, to, subject, html });
 }
 
-/* --------------------- UI ICONS --------------------- */
+/* --------------------- UI ICONS
+async function logDocAudit(req, { userId, action, docType, docId, meta = "" }) {
+  try {
+    const ip =
+      (req.headers["x-forwarded-for"] ? String(req.headers["x-forwarded-for"]).split(",")[0].trim() : "") ||
+      req.ip ||
+      "";
+    const ua = String(req.headers["user-agent"] || "");
+    await pool.query(
+      `INSERT INTO doc_audit (user_id, action, doc_type, doc_id, meta, ip, user_agent)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [userId || null, String(action || ""), String(docType || ""), Number(docId || 0), String(meta || ""), ip, ua]
+    );
+  } catch (e) {
+    // non-fatal
+    console.log("[audit skipped]", e?.message || e);
+  }
+}
+ --------------------- */
 function icon(name) {
   const common = `fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"`;
   if (name === "home") return `<svg width="18" height="18" viewBox="0 0 24 24" ${common}><path d="M3 10.5 12 3l9 7.5"/><path d="M5 10v11h14V10"/><path d="M9 21v-7h6v7"/></svg>`;
@@ -408,21 +426,27 @@ function icon(name) {
   return "";
 }
 
-function logoSvg() {
-  // Simple, clean inline mark (no external assets)
+function logoSvg({ w = 120, h = 34, color = "currentColor" } = {}) {
+  // User-approved mark: D⇄FX + DIRECT FREIGHT EXCHANGE (SVG)
+  // Uses currentColor so it renders correctly on dark UI.
   return `
-    <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true">
-      <defs>
-        <linearGradient id="dfx_g" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stop-color="rgba(34,197,94,1)"/>
-          <stop offset="1" stop-color="rgba(163,230,53,1)"/>
-        </linearGradient>
-      </defs>
-      <path d="M12 2 20 6v6c0 5.2-3.7 9.2-8 10-4.3-.8-8-4.8-8-10V6l8-4Z" fill="url(#dfx_g)"/>
-      <path d="M8.1 12.2h7.8" stroke="rgba(6,19,11,.9)" stroke-width="2" stroke-linecap="round"/>
-      <path d="M10 9.2h4" stroke="rgba(6,19,11,.9)" stroke-width="2" stroke-linecap="round"/>
-      <path d="M10 15.2h4" stroke="rgba(6,19,11,.9)" stroke-width="2" stroke-linecap="round"/>
-    </svg>`;
+  <svg width="${w}" height="${h}" viewBox="0 0 420 120"
+       xmlns="http://www.w3.org/2000/svg"
+       aria-label="DFX Direct Freight Exchange"
+       role="img">
+    <text x="20" y="86"
+          font-family="Arial Black, Arial, sans-serif"
+          font-size="56"
+          font-style="italic"
+          fill="${color}"
+          letter-spacing="2">D⇄FX</text>
+
+    <text x="22" y="108"
+          font-family="Arial, sans-serif"
+          font-size="14"
+          letter-spacing="2"
+          fill="${color}">DIRECT FREIGHT EXCHANGE</text>
+  </svg>`;
 }
 
 /* --------------------- UI (Layout) --------------------- */
@@ -958,6 +982,18 @@ async function initDb() {
       expires_at TIMESTAMPTZ NOT NULL,
       used_at TIMESTAMPTZ
     );
+
+    CREATE TABLE IF NOT EXISTS doc_audit (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      action TEXT NOT NULL,
+      doc_type TEXT NOT NULL,
+      doc_id INTEGER NOT NULL,
+      meta TEXT NOT NULL DEFAULT '',
+      ip TEXT NOT NULL DEFAULT '',
+      user_agent TEXT NOT NULL DEFAULT '',
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
   `);
 
   await ensureColumn("loads", "status", "TEXT NOT NULL DEFAULT ''OPEN''");
@@ -966,6 +1002,17 @@ async function initDb() {
   await ensureColumn("loads", "special_requirements", "TEXT NOT NULL DEFAULT ''''");
   await ensureColumn("loads", "detention_rate_per_hr", "NUMERIC NOT NULL DEFAULT 0");
   await ensureColumn("loads", "detention_after_hours", "INTEGER NOT NULL DEFAULT 0");
+
+  // Document workflow: allow admin approval + audit trail
+  await ensureColumn("carrier_files", "status", "TEXT NOT NULL DEFAULT 'PENDING'");
+  await ensureColumn("carrier_files", "reviewed_by_admin_id", "INTEGER");
+  await ensureColumn("carrier_files", "reviewed_at", "TIMESTAMPTZ");
+  await ensureColumn("carrier_files", "admin_note", "TEXT");
+
+  await ensureColumn("load_files", "status", "TEXT NOT NULL DEFAULT 'PENDING'");
+  await ensureColumn("load_files", "reviewed_by_admin_id", "INTEGER");
+  await ensureColumn("load_files", "reviewed_at", "TIMESTAMPTZ");
+  await ensureColumn("load_files", "admin_note", "TEXT");
 
   if (BOOTSTRAP_ADMIN_EMAIL) {
     const r = await pool.query(`SELECT id,role FROM users WHERE lower(email)=lower($1)`, [BOOTSTRAP_ADMIN_EMAIL]);
@@ -1434,6 +1481,8 @@ app.get("/carrier/file/:kind", requireAuth, requireRole("CARRIER"), async (req, 
   const f = r.rows[0];
   if (!f) return res.status(404).send("File not found.");
 
+  await logDocAudit(req, { userId: req.user.id, action: "VIEW", docType: "CARRIER_FILE", docId: req.user.id, meta: kind });
+
   res.setHeader("Content-Type", f.mimetype || "application/octet-stream");
   res.setHeader("Content-Disposition", `inline; filename="${String(f.filename || "file").replaceAll('"', "")}"`);
   res.send(f.bytes);
@@ -1477,6 +1526,7 @@ app.get("/documents", requireAuth, async (req, res) => {
   const lane = safeLower(req.query.lane || "");
   const filename = safeLower(req.query.filename || "");
   const uploadedBy = safeLower(req.query.uploaded_by || "");
+  const status = String(req.query.status || "").trim().toUpperCase();
 
   const like = (s) => `%${String(s || "").trim().toLowerCase()}%`;
 
@@ -1516,6 +1566,10 @@ app.get("/documents", requireAuth, async (req, res) => {
       carrierParams.push(like(q));
       carrierWhere.push(`(lower(filename) LIKE $${carrierParams.length} OR lower(kind) LIKE $${carrierParams.length})`);
     }
+    if (status && ["PENDING","APPROVED","REJECTED"].includes(status)) {
+      carrierParams.push(status);
+      carrierWhere.push(`status = $${carrierParams.length}`);
+    }
 
     const docs = await pool.query(
       `SELECT kind, filename, uploaded_at FROM carrier_files WHERE ${carrierWhere.join(" AND ")} ORDER BY uploaded_at DESC`,
@@ -1530,6 +1584,7 @@ app.get("/documents", requireAuth, async (req, res) => {
     if (lane) { params.push(like(lane)); where.push(`(lower(l.lane_from) LIKE $${params.length} OR lower(l.lane_to) LIKE $${params.length})`); }
     if (filename) { params.push(like(filename)); where.push(`lower(lf.filename) LIKE $${params.length}`); }
     if (uploadedBy) { params.push(like(uploadedBy)); where.push(`lower(u.email) LIKE $${params.length}`); }
+    if (status && ["PENDING","APPROVED","REJECTED"].includes(status)) { params.push(status); where.push(`lf.status = $${params.length}`); }
     if (q) {
       params.push(like(q));
       const p = params.length;
@@ -1826,6 +1881,11 @@ app.get("/", (req, res) => {
     <div class="hero">
       <div class="heroGrid">
         <div>
+
+          <div class="heroLogo" aria-hidden="true" style="margin-bottom:12px">
+            ${logoSvg({ w: 360, h: 98 })}
+          </div>
+
           <div class="badgeRow">
             <span class="badge badgeOk">${icon("spark")} No broker games</span>
             <span class="badge badgeOk">${icon("tag")} Transparent all-in pricing</span>
@@ -2743,12 +2803,13 @@ app.post(
 
       const upsertFile = async (kind, file) => {
         await pool.query(
-          `INSERT INTO carrier_files (carrier_id, kind, filename, mimetype, bytes)
-           VALUES ($1,$2,$3,$4,$5)
+          `INSERT INTO carrier_files (carrier_id, kind, filename, mimetype, bytes, status)
+           VALUES ($1,$2,$3,$4,$5,'PENDING')
            ON CONFLICT (carrier_id, kind) DO UPDATE SET
              filename=EXCLUDED.filename,
              mimetype=EXCLUDED.mimetype,
              bytes=EXCLUDED.bytes,
+             status='PENDING',
              uploaded_at=NOW()`,
           [req.user.id, kind, file.originalname, file.mimetype || "application/octet-stream", file.buffer]
         );
@@ -2757,6 +2818,8 @@ app.post(
       await upsertFile("W9", w9);
       await upsertFile("COI", coi);
       await upsertFile("AUTHORITY", auth);
+
+      await logDocAudit(req, { userId: req.user.id, action: "UPLOAD", docType: "CARRIER_FILE", docId: req.user.id, meta: "W9/COI/AUTHORITY" });
 
       res.redirect("/dashboard");
     } catch (e) {
@@ -2788,9 +2851,60 @@ app.get("/admin/carriers/:id/file/:kind", requireAuth, requireRole("ADMIN"), asy
   );
   const f = r.rows[0];
   if (!f) return res.status(404).send("File not found.");
+
+  await logDocAudit(req, { userId: req.user.id, action: "VIEW", docType: "CARRIER_FILE", docId: carrierId, meta: kind });
+
   res.setHeader("Content-Type", f.mimetype || "application/octet-stream");
   res.setHeader("Content-Disposition", `inline; filename="${f.filename.replaceAll('"', "")}"`);
   res.send(f.bytes);
+});
+
+
+/* --------------------- ADMIN: DOCUMENT APPROVAL --------------------- */
+app.post("/admin/docs/carrier/:id/:kind/approve", requireAuth, requireRole("ADMIN"), async (req, res) => {
+  const carrierId = Number(req.params.id);
+  const kind = String(req.params.kind || "").toUpperCase();
+  if (!["W9", "COI", "AUTHORITY"].includes(kind)) return res.status(400).send("Invalid kind.");
+  await pool.query(
+    `UPDATE carrier_files SET status='APPROVED', reviewed_by_admin_id=$1, reviewed_at=NOW(), admin_note=NULL WHERE carrier_id=$2 AND kind=$3`,
+    [req.user.id, carrierId, kind]
+  );
+  await logDocAudit(req, { userId: req.user.id, action: "APPROVE", docType: "CARRIER_FILE", docId: carrierId, meta: kind });
+  res.redirect("/documents?tab=carriers");
+});
+
+app.post("/admin/docs/carrier/:id/:kind/reject", requireAuth, requireRole("ADMIN"), async (req, res) => {
+  const carrierId = Number(req.params.id);
+  const kind = String(req.params.kind || "").toUpperCase();
+  const note = clampStr(req.body.note || "Rejected", 240);
+  if (!["W9", "COI", "AUTHORITY"].includes(kind)) return res.status(400).send("Invalid kind.");
+  await pool.query(
+    `UPDATE carrier_files SET status='REJECTED', reviewed_by_admin_id=$1, reviewed_at=NOW(), admin_note=$2 WHERE carrier_id=$3 AND kind=$4`,
+    [req.user.id, note, carrierId, kind]
+  );
+  await logDocAudit(req, { userId: req.user.id, action: "REJECT", docType: "CARRIER_FILE", docId: carrierId, meta: kind + ": " + note });
+  res.redirect("/documents?tab=carriers");
+});
+
+app.post("/admin/docs/load-file/:id/approve", requireAuth, requireRole("ADMIN"), async (req, res) => {
+  const id = Number(req.params.id);
+  await pool.query(
+    `UPDATE load_files SET status='APPROVED', reviewed_by_admin_id=$1, reviewed_at=NOW(), admin_note=NULL WHERE id=$2`,
+    [req.user.id, id]
+  );
+  await logDocAudit(req, { userId: req.user.id, action: "APPROVE", docType: "LOAD_FILE", docId: id, meta: "" });
+  res.redirect("/documents?tab=loads");
+});
+
+app.post("/admin/docs/load-file/:id/reject", requireAuth, requireRole("ADMIN"), async (req, res) => {
+  const id = Number(req.params.id);
+  const note = clampStr(req.body.note || "Rejected", 240);
+  await pool.query(
+    `UPDATE load_files SET status='REJECTED', reviewed_by_admin_id=$1, reviewed_at=NOW(), admin_note=$2 WHERE id=$3`,
+    [req.user.id, note, id]
+  );
+  await logDocAudit(req, { userId: req.user.id, action: "REJECT", docType: "LOAD_FILE", docId: id, meta: note });
+  res.redirect("/documents?tab=loads");
 });
 
 /* --------------------- LOAD BOARD (API + PAGE) --------------------- */
@@ -3350,10 +3464,12 @@ app.post("/carrier/loads/:id/bol", requireAuth, requireRole("CARRIER"), upload.s
   if (Number(l.booked_carrier_id) !== Number(req.user.id)) return res.status(403).send("Not your booked load.");
 
   await pool.query(
-    `INSERT INTO load_files (load_id, uploaded_by_user_id, kind, filename, mimetype, bytes)
-     VALUES ($1,$2,'BOL',$3,$4,$5)`,
+    `INSERT INTO load_files (load_id, uploaded_by_user_id, kind, filename, mimetype, bytes, status)
+     VALUES ($1,$2,'BOL',$3,$4,$5,'PENDING')`,
     [loadId, req.user.id, file.originalname, file.mimetype || "application/octet-stream", file.buffer]
   );
+
+  await logDocAudit(req, { userId: req.user.id, action: "UPLOAD", docType: "LOAD_FILE", docId: loadId, meta: "BOL" });
 
   res.redirect("/dashboard");
 });
