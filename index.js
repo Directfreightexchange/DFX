@@ -30,7 +30,6 @@ const DATABASE_URL = process.env.DATABASE_URL;
 const JWT_SECRET = process.env.JWT_SECRET;
 const APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;
 const BOOTSTRAP_ADMIN_EMAIL = String(process.env.BOOTSTRAP_ADMIN_EMAIL || "").trim().toLowerCase();
-const ADMIN_CREATE_SECRET = String(process.env.ADMIN_CREATE_SECRET || "").trim(); // optional: protect /admin/create
 
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY; // sk_...
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET; // whsec_...
@@ -222,39 +221,11 @@ const CONTRACT_TEMPLATES = {
 };
 
 function buildPdf(res, { title, filename, lines }) {
-  // If pdfkit isn't installed, fall back to a print-friendly HTML view.
-  // Users can still "Print / Save as PDF" from the browser.
   if (!PDFDocument) {
-    const html = `<!doctype html>
-      <html><head>
-        <meta charset="utf-8"/>
-        <meta name="viewport" content="width=device-width, initial-scale=1"/>
-        <title>${escapeHtml(title)}</title>
-        <style>
-          body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:40px;line-height:1.5;color:#111}
-          .wrap{max-width:860px;margin:0 auto}
-          h1{margin:0 0 8px 0;font-size:26px}
-          .muted{color:#555;font-size:13px;margin-bottom:18px}
-          pre{white-space:pre-wrap;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:13px;background:#f7f7f7;border:1px solid #e6e6e6;padding:16px;border-radius:12px}
-          .bar{display:flex;gap:10px;flex-wrap:wrap;margin:18px 0}
-          a.btn{display:inline-block;padding:10px 14px;border-radius:12px;border:1px solid #111;text-decoration:none;color:#111}
-          a.btnPrimary{background:#111;color:#fff}
-          @media print {.bar,.muted{display:none} body{margin:0}}
-        </style>
-      </head>
-      <body>
-        <div class="wrap">
-          <h1>${escapeHtml(title)}</h1>
-          <div class="muted">PDFKit isn’t enabled on the server. Use your browser: <b>Print → Save as PDF</b>.</div>
-          <div class="bar">
-            <a class="btn btnPrimary" href="#" onclick="window.print();return false;">Print / Save as PDF</a>
-            <a class="btn" href="/contracts">Back to Contracts</a>
-          </div>
-          <pre>${escapeHtml(lines.join("\n"))}</pre>
-        </div>
-      </body></html>`;
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    return res.send(html);
+    res.status(500).send(
+      "PDF generation is not enabled. Install pdfkit: `npm install pdfkit` and redeploy."
+    );
+    return;
   }
 
   res.setHeader("Content-Type", "application/pdf");
@@ -266,27 +237,36 @@ function buildPdf(res, { title, filename, lines }) {
   doc.pipe(res);
 
   // Simple, clean formatting
-  doc.font("Helvetica-Bold").fontSize(16).text(title);
-  doc.moveDown(0.75);
+  doc.font("Helvetica-Bold").fontSize(18).text("Direct Freight Exchange (DFX)", { align: "left" });
+  doc.moveDown(0.3);
+  doc.font("Helvetica").fontSize(10).fillColor("#444").text("Generated from DFX templates. Customize to your needs.", { align: "left" });
+  doc.moveDown(1);
+
+  doc.fillColor("#111").font("Helvetica-Bold").fontSize(16).text(title);
+  doc.moveDown(0.8);
 
   doc.font("Helvetica").fontSize(11);
-
-  const width = doc.page.width - doc.page.margins.left - doc.page.margins.right;
-  const lineHeight = 14;
-
   for (const line of lines) {
-    const t = String(line || "");
-    if (t.trim() === "") {
-      doc.moveDown(0.5);
+    const isHeading = /^[0-9]+\)|^Required Documents$|^Company \/ Contacts$|^Payment \/ Banking|^Operational Notes$|^SIGNATURES$/.test(line.trim());
+    if (!line.trim()) {
+      doc.moveDown(0.55);
       continue;
     }
-    doc.text(t, { width, lineGap: 2 });
-    doc.moveDown(0.15);
-    if (doc.y > doc.page.height - doc.page.margins.bottom - lineHeight * 2) {
-      doc.addPage();
-      doc.font("Helvetica").fontSize(11);
+    if (isHeading) {
+      doc.moveDown(0.2);
+      doc.font("Helvetica-Bold").text(line);
+      doc.font("Helvetica");
+      doc.moveDown(0.25);
+    } else {
+      doc.text(line, { lineGap: 2 });
     }
   }
+
+  doc.moveDown(1.2);
+  doc.fontSize(9).fillColor("#666").text(
+    "Template only. Not legal advice. Verify terms, insurance, and compliance for your operations.",
+    { align: "left" }
+  );
 
   doc.end();
 }
@@ -335,21 +315,6 @@ function monthKey(d = new Date()) {
 function sha256hex(s) {
   return crypto.createHash("sha256").update(String(s)).digest("hex");
 }
-
-async function logDocAudit({ entity, entityId, action, actorUserId, req }) {
-  try {
-    const ip = req?.headers ? (req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "").toString().slice(0, 120) : "";
-    const ua = req?.headers ? String(req.headers["user-agent"] || "").slice(0, 220) : "";
-    await pool.query(
-      `INSERT INTO document_audit (entity, entity_id, action, actor_user_id, ip, user_agent)
-       VALUES ($1,$2,$3,$4,$5,$6)`,
-      [entity, entityId, action, actorUserId || null, ip, ua]
-    );
-  } catch (e) {
-    console.log("[audit skipped]", e?.message || e);
-  }
-}
-
 function randomToken(bytes = 24) {
   return crypto.randomBytes(bytes).toString("hex");
 }
@@ -429,7 +394,25 @@ async function sendEmail(to, subject, html) {
   await t.sendMail({ from: SMTP_FROM, to, subject, html });
 }
 
-/* --------------------- UI ICONS --------------------- */
+/* --------------------- UI ICONS
+async function logDocAudit(req, { userId, action, docType, docId, meta = "" }) {
+  try {
+    const ip =
+      (req.headers["x-forwarded-for"] ? String(req.headers["x-forwarded-for"]).split(",")[0].trim() : "") ||
+      req.ip ||
+      "";
+    const ua = String(req.headers["user-agent"] || "");
+    await pool.query(
+      `INSERT INTO doc_audit (user_id, action, doc_type, doc_id, meta, ip, user_agent)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [userId || null, String(action || ""), String(docType || ""), Number(docId || 0), String(meta || ""), ip, ua]
+    );
+  } catch (e) {
+    // non-fatal
+    console.log("[audit skipped]", e?.message || e);
+  }
+}
+ --------------------- */
 function icon(name) {
   const common = `fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"`;
   if (name === "home") return `<svg width="18" height="18" viewBox="0 0 24 24" ${common}><path d="M3 10.5 12 3l9 7.5"/><path d="M5 10v11h14V10"/><path d="M9 21v-7h6v7"/></svg>`;
@@ -443,21 +426,27 @@ function icon(name) {
   return "";
 }
 
-function logoSvg() {
-  // Simple, clean inline mark (no external assets)
+function logoSvg({ w = 120, h = 34, color = "currentColor" } = {}) {
+  // User-approved mark: D⇄FX + DIRECT FREIGHT EXCHANGE (SVG)
+  // Uses currentColor so it renders correctly on dark UI.
   return `
-    <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true">
-      <defs>
-        <linearGradient id="dfx_g" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stop-color="rgba(34,197,94,1)"/>
-          <stop offset="1" stop-color="rgba(163,230,53,1)"/>
-        </linearGradient>
-      </defs>
-      <path d="M12 2 20 6v6c0 5.2-3.7 9.2-8 10-4.3-.8-8-4.8-8-10V6l8-4Z" fill="url(#dfx_g)"/>
-      <path d="M8.1 12.2h7.8" stroke="rgba(6,19,11,.9)" stroke-width="2" stroke-linecap="round"/>
-      <path d="M10 9.2h4" stroke="rgba(6,19,11,.9)" stroke-width="2" stroke-linecap="round"/>
-      <path d="M10 15.2h4" stroke="rgba(6,19,11,.9)" stroke-width="2" stroke-linecap="round"/>
-    </svg>`;
+  <svg width="${w}" height="${h}" viewBox="0 0 420 120"
+       xmlns="http://www.w3.org/2000/svg"
+       aria-label="DFX Direct Freight Exchange"
+       role="img">
+    <text x="20" y="86"
+          font-family="Arial Black, Arial, sans-serif"
+          font-size="56"
+          font-style="italic"
+          fill="${color}"
+          letter-spacing="2">D⇄FX</text>
+
+    <text x="22" y="108"
+          font-family="Arial, sans-serif"
+          font-size="14"
+          letter-spacing="2"
+          fill="${color}">DIRECT FREIGHT EXCHANGE</text>
+  </svg>`;
 }
 
 /* --------------------- UI (Layout) --------------------- */
@@ -472,7 +461,7 @@ function layout({ title, user, body, extraHead = "", extraScript = "" }) {
 
   const topCta = user
     ? `<a class="btn btnPrimary" href="/dashboard">Dashboard</a><a class="btn btnGhost" href="/logout">Logout</a>`
-    : `<a class="btn btnGhost" href="/admin/login">Admin</a><a class="btn btnGhost" href="/login">Login</a><a class="btn btnPrimary" href="/signup">Get Started</a>`;
+    : `<a class="btn btnGhost" href="/login">Login</a><a class="btn btnPrimary" href="/signup">Get Started</a>`;
 
   return `<!doctype html>
 <html>
@@ -830,6 +819,7 @@ input:focus,select:focus,textarea:focus{border-color:rgba(34,197,94,.55)}
       <a class="linkPill" href="/loads">${icon("search")} Load Board</a>
       <a class="linkPill" href="/features">${icon("tag")} Pricing & Features</a>
       <a class="linkPill" href="/contracts">${icon("clipboard")} Contracts</a>
+      ${user ? `<a class="linkPill" href="/documents">${icon("clipboard")} Documents</a>` : ``}
       <a class="linkPill" href="/about">${icon("spark")} About</a>
     </div>
 
@@ -985,23 +975,24 @@ async function initDb() {
       uploaded_at TIMESTAMPTZ DEFAULT NOW()
     );
 
-    CREATE TABLE IF NOT EXISTS document_audit (
-      id SERIAL PRIMARY KEY,
-      entity TEXT NOT NULL CHECK (entity IN ('CARRIER_FILE','LOAD_FILE')),
-      entity_id INTEGER NOT NULL,
-      action TEXT NOT NULL CHECK (action IN ('UPLOAD','VIEW','APPROVE','REJECT','DELETE')),
-      actor_user_id INTEGER REFERENCES users(id),
-      ip TEXT,
-      user_agent TEXT,
-      created_at TIMESTAMPTZ DEFAULT NOW()
-    );
-
     CREATE TABLE IF NOT EXISTS password_resets (
       id SERIAL PRIMARY KEY,
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       token_hash TEXT NOT NULL,
       expires_at TIMESTAMPTZ NOT NULL,
       used_at TIMESTAMPTZ
+    );
+
+    CREATE TABLE IF NOT EXISTS doc_audit (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      action TEXT NOT NULL,
+      doc_type TEXT NOT NULL,
+      doc_id INTEGER NOT NULL,
+      meta TEXT NOT NULL DEFAULT '',
+      ip TEXT NOT NULL DEFAULT '',
+      user_agent TEXT NOT NULL DEFAULT '',
+      created_at TIMESTAMPTZ DEFAULT NOW()
     );
   `);
 
@@ -1012,15 +1003,16 @@ async function initDb() {
   await ensureColumn("loads", "detention_rate_per_hr", "NUMERIC NOT NULL DEFAULT 0");
   await ensureColumn("loads", "detention_after_hours", "INTEGER NOT NULL DEFAULT 0");
 
-  await ensureColumn("carrier_files", "review_status", "TEXT NOT NULL DEFAULT 'PENDING'");
+  // Document workflow: allow admin approval + audit trail
+  await ensureColumn("carrier_files", "status", "TEXT NOT NULL DEFAULT 'PENDING'");
   await ensureColumn("carrier_files", "reviewed_by_admin_id", "INTEGER");
   await ensureColumn("carrier_files", "reviewed_at", "TIMESTAMPTZ");
   await ensureColumn("carrier_files", "admin_note", "TEXT");
-  await ensureColumn("load_files", "review_status", "TEXT NOT NULL DEFAULT 'PENDING'");
+
+  await ensureColumn("load_files", "status", "TEXT NOT NULL DEFAULT 'PENDING'");
   await ensureColumn("load_files", "reviewed_by_admin_id", "INTEGER");
   await ensureColumn("load_files", "reviewed_at", "TIMESTAMPTZ");
   await ensureColumn("load_files", "admin_note", "TEXT");
-
 
   if (BOOTSTRAP_ADMIN_EMAIL) {
     const r = await pool.query(`SELECT id,role FROM users WHERE lower(email)=lower($1)`, [BOOTSTRAP_ADMIN_EMAIL]);
@@ -1475,6 +1467,393 @@ app.get("/contracts", (req, res) => {
   }));
 });
 
+
+/* --------------------- DOCUMENTS (VISIBLE PAPERWORK) --------------------- */
+// Carrier self-view of their uploaded compliance docs
+app.get("/carrier/file/:kind", requireAuth, requireRole("CARRIER"), async (req, res) => {
+  const kind = String(req.params.kind || "").toUpperCase();
+  if (!["W9", "COI", "AUTHORITY"].includes(kind)) return res.status(400).send("Invalid file kind.");
+
+  const r = await pool.query(
+    `SELECT filename, mimetype, bytes FROM carrier_files WHERE carrier_id=$1 AND kind=$2`,
+    [req.user.id, kind]
+  );
+  const f = r.rows[0];
+  if (!f) return res.status(404).send("File not found.");
+
+  await logDocAudit(req, { userId: req.user.id, action: "VIEW", docType: "CARRIER_FILE", docId: req.user.id, meta: kind });
+
+  res.setHeader("Content-Type", f.mimetype || "application/octet-stream");
+  res.setHeader("Content-Disposition", `inline; filename="${String(f.filename || "file").replaceAll('"', "")}"`);
+  res.send(f.bytes);
+});
+
+// Download a load file (BOL/POD/etc.) with access control
+app.get("/documents/load-file/:id", requireAuth, async (req, res) => {
+  const fileId = Number(req.params.id);
+  const r = await pool.query(
+    `SELECT lf.id, lf.load_id, lf.filename, lf.mimetype, lf.bytes, lf.uploaded_by_user_id,
+            l.shipper_id, l.booked_carrier_id
+     FROM load_files lf
+     JOIN loads l ON l.id = lf.load_id
+     WHERE lf.id=$1`,
+    [fileId]
+  );
+  const f = r.rows[0];
+  if (!f) return res.status(404).send("File not found.");
+
+  const u = req.user;
+  const ok =
+    u.role === "ADMIN" ||
+    Number(f.shipper_id) === Number(u.id) ||
+    (f.booked_carrier_id && Number(f.booked_carrier_id) === Number(u.id)) ||
+    Number(f.uploaded_by_user_id) === Number(u.id);
+
+  if (!ok) return res.sendStatus(403);
+
+  res.setHeader("Content-Type", f.mimetype || "application/octet-stream");
+  res.setHeader("Content-Disposition", `attachment; filename="${String(f.filename || "file").replaceAll('"', "")}"`);
+  res.send(f.bytes);
+});
+
+// Documents hub (carrier + shipper)
+app.get("/documents", requireAuth, async (req, res) => {
+  const user = req.user;
+
+  // Shared filters
+  const q = safeLower(req.query.q || "");
+  const loadId = int(req.query.load_id || 0) || null;
+  const lane = safeLower(req.query.lane || "");
+  const filename = safeLower(req.query.filename || "");
+  const uploadedBy = safeLower(req.query.uploaded_by || "");
+  const status = String(req.query.status || "").trim().toUpperCase();
+
+  const like = (s) => `%${String(s || "").trim().toLowerCase()}%`;
+
+  const filterForm = `
+    <form method="GET" action="/documents" class="formGrid" style="margin-top:12px">
+      <div class="threeCol">
+        <input name="q" placeholder="Search everything…" value="${escapeHtml(req.query.q || "")}" />
+        <input name="load_id" placeholder="Load #" value="${escapeHtml(req.query.load_id || "")}" />
+        <input name="lane" placeholder="Lane contains (Houston, Dallas…)" value="${escapeHtml(req.query.lane || "")}" />
+      </div>
+      <div class="threeCol">
+        <input name="filename" placeholder="Filename contains…" value="${escapeHtml(req.query.filename || "")}" />
+        <input name="uploaded_by" placeholder="Uploaded-by email contains…" value="${escapeHtml(req.query.uploaded_by || "")}" />
+        <div style="display:flex;gap:10px;flex-wrap:wrap">
+          <button class="btn btnPrimary" type="submit">${icon("search")} Search</button>
+          <a class="btn btnGhost" href="/documents">Reset</a>
+          <a class="btn btnGhost" href="/dashboard">${icon("home")} Back</a>
+        </div>
+      </div>
+      <div class="small">Tip: Use one field or combine filters. All searches are case-insensitive.</div>
+    </form>
+  `;
+
+  // Carrier view
+  if (user.role === "CARRIER") {
+    const c =
+      (await pool.query(`SELECT * FROM carriers_compliance WHERE carrier_id=$1`, [user.id])).rows[0] || { status: "PENDING" };
+
+    // Carrier compliance files (W9/COI/AUTH)
+    const carrierParams = [user.id];
+    const carrierWhere = [`carrier_id=$1`];
+    if (filename) {
+      carrierParams.push(like(filename));
+      carrierWhere.push(`lower(filename) LIKE $${carrierParams.length}`);
+    }
+    if (q) {
+      carrierParams.push(like(q));
+      carrierWhere.push(`(lower(filename) LIKE $${carrierParams.length} OR lower(kind) LIKE $${carrierParams.length})`);
+    }
+    if (status && ["PENDING","APPROVED","REJECTED"].includes(status)) {
+      carrierParams.push(status);
+      carrierWhere.push(`status = $${carrierParams.length}`);
+    }
+
+    const docs = await pool.query(
+      `SELECT kind, filename, uploaded_at FROM carrier_files WHERE ${carrierWhere.join(" AND ")} ORDER BY uploaded_at DESC`,
+      carrierParams
+    );
+
+    // Load paperwork (BOL etc.) for booked loads
+    const params = [user.id];
+    const where = [`l.booked_carrier_id=$1`];
+
+    if (loadId) { params.push(loadId); where.push(`l.id = $${params.length}`); }
+    if (lane) { params.push(like(lane)); where.push(`(lower(l.lane_from) LIKE $${params.length} OR lower(l.lane_to) LIKE $${params.length})`); }
+    if (filename) { params.push(like(filename)); where.push(`lower(lf.filename) LIKE $${params.length}`); }
+    if (uploadedBy) { params.push(like(uploadedBy)); where.push(`lower(u.email) LIKE $${params.length}`); }
+    if (status && ["PENDING","APPROVED","REJECTED"].includes(status)) { params.push(status); where.push(`lf.status = $${params.length}`); }
+    if (q) {
+      params.push(like(q));
+      const p = params.length;
+      where.push(`(
+        lower(l.lane_from) LIKE $${p} OR
+        lower(l.lane_to) LIKE $${p} OR
+        lower(lf.filename) LIKE $${p} OR
+        lower(lf.kind) LIKE $${p} OR
+        lower(u.email) LIKE $${p}
+      )`);
+    }
+
+    const loadFiles = await pool.query(
+      `SELECT lf.id, lf.kind, lf.filename, lf.uploaded_at, u.email AS uploader_email,
+              l.id AS load_id, l.lane_from, l.lane_to, l.status
+       FROM load_files lf
+       JOIN users u ON u.id = lf.uploaded_by_user_id
+       JOIN loads l ON l.id = lf.load_id
+       WHERE ${where.join(" AND ")}
+       ORDER BY lf.uploaded_at DESC
+       LIMIT 400`,
+      params
+    );
+
+    const bookedLoadsParams = [user.id];
+    const bookedLoadsWhere = [`booked_carrier_id=$1`];
+    if (loadId) { bookedLoadsParams.push(loadId); bookedLoadsWhere.push(`id = $${bookedLoadsParams.length}`); }
+    if (lane) { bookedLoadsParams.push(like(lane)); bookedLoadsWhere.push(`(lower(lane_from) LIKE $${bookedLoadsParams.length} OR lower(lane_to) LIKE $${bookedLoadsParams.length})`); }
+    if (q) {
+      bookedLoadsParams.push(like(q));
+      const p = bookedLoadsParams.length;
+      bookedLoadsWhere.push(`(lower(lane_from) LIKE $${p} OR lower(lane_to) LIKE $${p})`);
+    }
+
+    const bookedLoads = await pool.query(
+      `SELECT * FROM loads WHERE ${bookedLoadsWhere.join(" AND ")} ORDER BY created_at DESC LIMIT 200`,
+      bookedLoadsParams
+    );
+
+    const byKind = {};
+    for (const d of docs.rows || []) byKind[String(d.kind || "").toUpperCase()] = d;
+
+    const docTile = (k, label) => {
+      const row = byKind[k];
+      return `
+        <div class="feature">
+          <div class="featureTop">
+            <div class="featureIcon">${icon("shield")}</div>
+            <div>
+              <div class="featureTitle">${escapeHtml(label)}</div>
+              <div class="small">${row ? `${escapeHtml(row.filename)} • ${escapeHtml(String(row.uploaded_at).slice(0,10))}` : "Not uploaded yet"}</div>
+            </div>
+          </div>
+          <div class="divider"></div>
+          <div style="display:flex;gap:10px;flex-wrap:wrap">
+            ${row ? `<a class="btn btnPrimary" target="_blank" href="/carrier/file/${k}">View</a>` : ``}
+            <a class="btn btnGhost" href="/dashboard">Update via Dashboard</a>
+          </div>
+        </div>
+      `;
+    };
+
+    const bolList = loadFiles.rows.length
+      ? loadFiles.rows.map(f => `
+        <div class="loadCard">
+          <div class="loadTop">
+            <div>
+              <div class="lane">Load #${int(f.load_id)} • ${escapeHtml(f.lane_from)} → ${escapeHtml(f.lane_to)}</div>
+              <div class="muted">${escapeHtml(f.kind)} • ${escapeHtml(f.filename)} • Uploaded by ${escapeHtml(f.uploader_email)} • ${escapeHtml(String(f.uploaded_at).slice(0,19).replace("T"," "))}</div>
+            </div>
+            <div style="display:flex;gap:10px;flex-wrap:wrap">
+              <a class="btn btnPrimary" target="_blank" href="/documents/load-file/${int(f.id)}">View</a>
+              <a class="btn btnGhost" href="/carrier/loads/${int(f.load_id)}/documents">Open load docs</a>
+            </div>
+          </div>
+        </div>
+      `).join("")
+      : `<div class="muted">No paperwork matches your filters.</div>`;
+
+    const bookedList = bookedLoads.rows.length
+      ? bookedLoads.rows.map(l => `
+        <div class="loadCard">
+          <div class="loadTop">
+            <div>
+              <div class="lane">Load #${l.id} • ${escapeHtml(l.lane_from)} → ${escapeHtml(l.lane_to)}</div>
+              <div class="muted">${escapeHtml(l.pickup_date)} → ${escapeHtml(l.delivery_date)} • Status: ${escapeHtml(l.status)}</div>
+              <div class="chips">
+                <span class="chip chipStrong">${escapeHtml(l.equipment)}</span>
+                <span class="chip mono">${int(l.miles).toLocaleString()} mi</span>
+                <span class="chip">Docs</span>
+              </div>
+            </div>
+            <div style="display:flex;gap:10px;flex-wrap:wrap">
+              <a class="btn btnPrimary" href="/carrier/loads/${l.id}/documents">Documents</a>
+              ${l.status === "BOOKED" ? `<a class="btn btnGhost" href="/carrier/loads/${l.id}/documents#upload">Upload BOL</a>` : ``}
+            </div>
+          </div>
+        </div>
+      `).join("")
+      : `<div class="muted">No booked loads match your filters.</div>`;
+
+    const body = `
+      <div class="section">
+        <div class="spread">
+          <div>
+            <h2 style="margin:0">Documents</h2>
+            <div class="muted" style="margin-top:8px;line-height:1.6;max-width:980px">
+              Everything lives inside DFX. Search and manage compliance docs and load paperwork.
+            </div>
+          </div>
+          <span class="badge ${c.status === "APPROVED" ? "badgeOk" : "badgeWarn"}">${icon("shield")} Verification: ${escapeHtml(c.status || "PENDING")}</span>
+        </div>
+
+        ${filterForm}
+
+        <div class="divider"></div>
+        <h3 style="margin:0">Carrier compliance documents</h3>
+        <div class="divider"></div>
+        <div class="grid3">
+          ${docTile("W9","W‑9")}
+          ${docTile("COI","Certificate of Insurance")}
+          ${docTile("AUTHORITY","Operating Authority")}
+        </div>
+
+        <div class="divider"></div>
+        <h3 style="margin:0">Booked loads</h3>
+        <div class="muted" style="margin-top:6px">Open a load to upload/view BOLs and paperwork.</div>
+        <div class="divider"></div>
+        ${bookedList}
+
+        <div class="divider"></div>
+        <h3 style="margin:0">Uploaded paperwork</h3>
+        <div class="muted" style="margin-top:6px">Audit trail included: uploaded-by + timestamp.</div>
+        <div class="divider"></div>
+        ${bolList}
+      </div>
+    `;
+    return res.send(layout({ title: "Documents", user, body }));
+  }
+
+  // Shipper view
+  if (user.role === "SHIPPER") {
+    const bookedParams = [user.id];
+    const bookedWhere = [`shipper_id=$1`, `status='BOOKED'`];
+    if (loadId) { bookedParams.push(loadId); bookedWhere.push(`id = $${bookedParams.length}`); }
+    if (lane) { bookedParams.push(like(lane)); bookedWhere.push(`(lower(lane_from) LIKE $${bookedParams.length} OR lower(lane_to) LIKE $${bookedParams.length})`); }
+    if (q) {
+      bookedParams.push(like(q));
+      const p = bookedParams.length;
+      bookedWhere.push(`(lower(lane_from) LIKE $${p} OR lower(lane_to) LIKE $${p})`);
+    }
+
+    const booked = await pool.query(
+      `SELECT * FROM loads WHERE ${bookedWhere.join(" AND ")} ORDER BY created_at DESC LIMIT 200`,
+      bookedParams
+    );
+
+    const lfParams = [user.id];
+    const lfWhere = [`l.shipper_id=$1`];
+    if (loadId) { lfParams.push(loadId); lfWhere.push(`l.id = $${lfParams.length}`); }
+    if (lane) { lfParams.push(like(lane)); lfWhere.push(`(lower(l.lane_from) LIKE $${lfParams.length} OR lower(l.lane_to) LIKE $${lfParams.length})`); }
+    if (filename) { lfParams.push(like(filename)); lfWhere.push(`lower(lf.filename) LIKE $${lfParams.length}`); }
+    if (uploadedBy) { lfParams.push(like(uploadedBy)); lfWhere.push(`lower(u.email) LIKE $${lfParams.length}`); }
+    if (q) {
+      lfParams.push(like(q));
+      const p = lfParams.length;
+      lfWhere.push(`(
+        lower(l.lane_from) LIKE $${p} OR
+        lower(l.lane_to) LIKE $${p} OR
+        lower(lf.filename) LIKE $${p} OR
+        lower(lf.kind) LIKE $${p} OR
+        lower(u.email) LIKE $${p}
+      )`);
+    }
+
+    const files = await pool.query(
+      `SELECT lf.id, lf.kind, lf.filename, lf.uploaded_at, u.email AS uploader_email,
+              l.id AS load_id, l.lane_from, l.lane_to, l.status
+       FROM load_files lf
+       JOIN users u ON u.id = lf.uploaded_by_user_id
+       JOIN loads l ON l.id = lf.load_id
+       WHERE ${lfWhere.join(" AND ")}
+       ORDER BY lf.uploaded_at DESC
+       LIMIT 500`,
+      lfParams
+    );
+
+    const bookedCards = booked.rows.length
+      ? booked.rows.map(l => `
+        <div class="loadCard">
+          <div class="loadTop">
+            <div>
+              <div class="lane">Load #${l.id} • ${escapeHtml(l.lane_from)} → ${escapeHtml(l.lane_to)}</div>
+              <div class="muted">${escapeHtml(l.pickup_date)} → ${escapeHtml(l.delivery_date)}</div>
+              <div class="chips">
+                <span class="chip chipStrong">${money(l.rate_all_in)}</span>
+                <span class="chip">${escapeHtml(l.equipment)}</span>
+                <span class="chip mono">${int(l.miles).toLocaleString()} mi</span>
+              </div>
+            </div>
+            <div style="display:flex;gap:10px;flex-wrap:wrap">
+              <a class="btn btnPrimary" target="_blank" href="/shipper/loads/${l.id}/rate-confirmation">Rate confirmation</a>
+              <a class="btn btnGhost" href="/shipper/loads/${l.id}/documents">Documents</a>
+            </div>
+          </div>
+        </div>
+      `).join("")
+      : `<div class="muted">No booked loads match your filters.</div>`;
+
+    const fileCards = files.rows.length
+      ? files.rows.map(f => `
+        <div class="loadCard">
+          <div class="loadTop">
+            <div>
+              <div class="lane">Load #${int(f.load_id)} • ${escapeHtml(f.lane_from)} → ${escapeHtml(f.lane_to)}</div>
+              <div class="muted">${escapeHtml(f.kind)} • ${escapeHtml(f.filename)} • Uploaded by ${escapeHtml(f.uploader_email)} • ${escapeHtml(String(f.uploaded_at).slice(0,19).replace("T"," "))}</div>
+            </div>
+            <div style="display:flex;gap:10px;flex-wrap:wrap">
+              <a class="btn btnPrimary" target="_blank" href="/documents/load-file/${int(f.id)}">View</a>
+              <a class="btn btnGhost" href="/shipper/loads/${int(f.load_id)}/documents">Open load docs</a>
+            </div>
+          </div>
+        </div>
+      `).join("")
+      : `<div class="muted">No uploaded paperwork matches your filters.</div>`;
+
+    const body = `
+      <div class="section">
+        <div class="spread">
+          <div>
+            <h2 style="margin:0">Documents</h2>
+            <div class="muted" style="margin-top:8px;line-height:1.6;max-width:980px">
+              Review rate confirmations and shipment paperwork stored inside DFX.
+            </div>
+          </div>
+        </div>
+
+        ${filterForm}
+
+        <div class="divider"></div>
+        <h3 style="margin:0">Booked load confirmations</h3>
+        <div class="muted" style="margin-top:6px">Open a booked load to view its rate confirmation and documents.</div>
+        <div class="divider"></div>
+        ${bookedCards}
+
+        <div class="divider"></div>
+        <h3 style="margin:0">Uploaded paperwork (BOL, etc.)</h3>
+        <div class="muted" style="margin-top:6px">Audit trail included: uploaded-by + timestamp.</div>
+        <div class="divider"></div>
+        ${fileCards}
+      </div>
+    `;
+    return res.send(layout({ title: "Documents", user, body }));
+  }
+
+  // Admin view (simple hub)
+  const body = `
+    <div class="section">
+      <h2 style="margin:0">Documents</h2>
+      <div class="muted" style="margin-top:8px;line-height:1.6;max-width:980px">
+        Admins can review carrier files from the Admin dashboard. Use the carrier verification list to open W‑9/COI/Authority.
+      </div>
+      <div class="divider"></div>
+      <a class="btn btnPrimary" href="/dashboard">${icon("shield")} Go to Admin dashboard</a>
+    </div>
+  `;
+  return res.send(layout({ title: "Documents", user, body }));
+});
+
 app.get("/contracts/shipper-carrier.txt", (_req, res) => {
   const t = CONTRACT_TEMPLATES.SHIPPER_CARRIER;
   res.setHeader("Content-Type", "text/plain; charset=utf-8");
@@ -1502,6 +1881,11 @@ app.get("/", (req, res) => {
     <div class="hero">
       <div class="heroGrid">
         <div>
+
+          <div class="heroLogo" aria-hidden="true" style="margin-bottom:12px">
+            ${logoSvg({ w: 360, h: 98 })}
+          </div>
+
           <div class="badgeRow">
             <span class="badge badgeOk">${icon("spark")} No broker games</span>
             <span class="badge badgeOk">${icon("tag")} Transparent all-in pricing</span>
@@ -1762,103 +2146,6 @@ app.post("/signup", async (req, res) => {
     res.status(500).send("Signup failed.");
   }
 });
-
-
-/* --------------------- ADMIN LOGIN / CREATE --------------------- */
-app.get("/admin/login", (req, res) => {
-  const user = getUser(req);
-  res.send(layout({
-    title: "Admin Login",
-    user,
-    body: `
-      <div class="section">
-        <div class="spread">
-          <div>
-            <h2 style="margin:0">Admin Login</h2>
-            <div class="muted" style="margin-top:8px">Admins manage carrier approvals, documents, and audits.</div>
-          </div>
-          ${ADMIN_CREATE_SECRET ? `<a class="btn btnGhost" href="/admin/create">Create admin</a>` : ``}
-        </div>
-
-        <div class="divider"></div>
-
-        <form method="POST" action="/login" class="formGrid">
-          <div class="twoCol">
-            <input name="email" type="email" placeholder="Admin email" required />
-            <input name="password" type="password" placeholder="Password" required />
-          </div>
-          <div style="display:flex;gap:10px;flex-wrap:wrap">
-            <button class="btn btnPrimary" type="submit">Login</button>
-            <a class="btn btnGhost" href="/">Home</a>
-          </div>
-          <div class="small">Admin accounts are regular accounts with role <span class="mono">ADMIN</span>.</div>
-        </form>
-      </div>
-    `
-  }));
-});
-
-app.get("/admin/create", (req, res) => {
-  const user = getUser(req);
-  const enabled = !!ADMIN_CREATE_SECRET;
-  res.send(layout({
-    title: "Create Admin",
-    user,
-    body: `
-      <div class="section">
-        <h2 style="margin:0">Create admin</h2>
-        <div class="muted" style="margin-top:8px;line-height:1.6">
-          ${enabled
-            ? `Use the secret to create an admin account.`
-            : `This is disabled. Set <span class="mono">ADMIN_CREATE_SECRET</span> in Render to enable.`
-          }
-        </div>
-
-        <div class="divider"></div>
-
-        ${enabled ? `
-          <form method="POST" action="/admin/create" class="formGrid">
-            <div class="twoCol">
-              <input name="email" type="email" placeholder="Admin email" required />
-              <input name="password" type="password" placeholder="Password (min 8 chars)" minlength="8" required />
-            </div>
-            <div class="twoCol">
-              <input name="secret" type="password" placeholder="ADMIN_CREATE_SECRET" required />
-              <button class="btn btnPrimary" type="submit">Create admin</button>
-            </div>
-            <div class="small">After creation, login via <a href="/admin/login">/admin/login</a>.</div>
-          </form>
-        ` : ``}
-      </div>
-    `
-  }));
-});
-
-app.post("/admin/create", async (req, res) => {
-  try {
-    if (!ADMIN_CREATE_SECRET) return res.status(403).send("Admin creation is disabled.");
-    const secret = String(req.body.secret || "");
-    if (secret !== ADMIN_CREATE_SECRET) return res.status(403).send("Invalid secret.");
-
-    const email = safeLower(req.body.email);
-    const password = String(req.body.password || "");
-    if (!email || password.length < 8) return res.status(400).send("Invalid email/password.");
-
-    const hash = await bcrypt.hash(password, 12);
-    const r = await pool.query(
-      "INSERT INTO users (email, password_hash, role) VALUES ($1,$2,'ADMIN') RETURNING id,email,role",
-      [email, hash]
-    );
-    const u = r.rows[0];
-    signIn(res, u);
-    res.redirect("/dashboard");
-  } catch (e) {
-    if (String(e).toLowerCase().includes("duplicate")) return res.status(409).send("Email already exists. Use /admin/login.");
-    console.error(e);
-    res.status(500).send("Admin create failed.");
-  }
-});
-
 
 app.get("/login", (req, res) => {
   const user = getUser(req);
@@ -2407,12 +2694,6 @@ app.get("/dashboard", requireAuth, async (req, res) => {
 
       <div class="divider"></div>
 
-      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px">
-        <a class="btn btnPrimary" href="/admin/documents">Documents</a>
-        <a class="btn btnGhost" href="/admin/audit">Audit log</a>
-        <a class="btn btnGhost" href="/contracts">Contracts</a>
-      </div>
-
       ${pending.rows.length ? pending.rows.map(p => `
         <div class="loadCard">
           <div class="loadTop">
@@ -2522,16 +2803,13 @@ app.post(
 
       const upsertFile = async (kind, file) => {
         await pool.query(
-          `INSERT INTO carrier_files (carrier_id, kind, filename, mimetype, bytes)
-           VALUES ($1,$2,$3,$4,$5)
+          `INSERT INTO carrier_files (carrier_id, kind, filename, mimetype, bytes, status)
+           VALUES ($1,$2,$3,$4,$5,'PENDING')
            ON CONFLICT (carrier_id, kind) DO UPDATE SET
              filename=EXCLUDED.filename,
              mimetype=EXCLUDED.mimetype,
              bytes=EXCLUDED.bytes,
-             review_status='PENDING',
-             reviewed_by_admin_id=NULL,
-             reviewed_at=NULL,
-             admin_note=NULL,
+             status='PENDING',
              uploaded_at=NOW()`,
           [req.user.id, kind, file.originalname, file.mimetype || "application/octet-stream", file.buffer]
         );
@@ -2541,17 +2819,9 @@ app.post(
       await upsertFile("COI", coi);
       await upsertFile("AUTHORITY", auth);
 
+      await logDocAudit(req, { userId: req.user.id, action: "UPLOAD", docType: "CARRIER_FILE", docId: req.user.id, meta: "W9/COI/AUTHORITY" });
 
-// audit
-try {
-  const ids = await pool.query(`SELECT id FROM carrier_files WHERE carrier_id=$1`, [req.user.id]);
-  for (const row of ids.rows) {
-    await logDocAudit({ entity: "CARRIER_FILE", entityId: row.id, action: "UPLOAD", actorUserId: req.user.id, req });
-  }
-} catch {}
-
-res.redirect("/dashboard");
-
+      res.redirect("/dashboard");
     } catch (e) {
       console.error("Compliance upload failed:", e);
       res.status(500).send("Compliance upload failed.");
@@ -2581,229 +2851,60 @@ app.get("/admin/carriers/:id/file/:kind", requireAuth, requireRole("ADMIN"), asy
   );
   const f = r.rows[0];
   if (!f) return res.status(404).send("File not found.");
+
+  await logDocAudit(req, { userId: req.user.id, action: "VIEW", docType: "CARRIER_FILE", docId: carrierId, meta: kind });
+
   res.setHeader("Content-Type", f.mimetype || "application/octet-stream");
   res.setHeader("Content-Disposition", `inline; filename="${f.filename.replaceAll('"', "")}"`);
   res.send(f.bytes);
 });
 
 
-/* --------------------- ADMIN: DOCUMENTS + AUDIT --------------------- */
-app.get("/admin/documents", requireAuth, requireRole("ADMIN"), async (req, res) => {
-  const user = req.user;
-
-  const q = safeLower(req.query.q || "");
-  const fileName = safeLower(req.query.filename || "");
-  const uploadedBy = safeLower(req.query.uploaded_by || "");
-  const loadId = String(req.query.load || "").trim();
-
-  const params = [];
-  const where = [];
-  const push = (v) => { params.push(v); return `$${params.length}`; };
-
-  // Carrier files
-  const cfWhere = [];
-  if (fileName) cfWhere.push(`lower(cf.filename) LIKE ${push(`%${fileName}%`)}`);
-  if (q) cfWhere.push(`(lower(u.email) LIKE ${push(`%${q}%`)} OR lower(cf.kind) LIKE ${push(`%${q}%`)})`);
-  const cfSqlWhere = cfWhere.length ? `WHERE ${cfWhere.join(" AND ")}` : "";
-
-  // Load files
-  const lfWhere = [];
-  if (fileName) lfWhere.push(`lower(lf.filename) LIKE ${push(`%${fileName}%`)}`);
-  if (uploadedBy) lfWhere.push(`lower(uu.email) LIKE ${push(`%${uploadedBy}%`)}`);
-  if (loadId) lfWhere.push(`lf.load_id = ${push(Number(loadId))}`);
-  if (q) lfWhere.push(`(lower(l.lane_from) LIKE ${push(`%${q}%`)} OR lower(l.lane_to) LIKE ${push(`%${q}%`)} OR lower(lf.kind) LIKE ${push(`%${q}%`)})`);
-  const lfSqlWhere = lfWhere.length ? `WHERE ${lfWhere.join(" AND ")}` : "";
-
-  const carrierFiles = await pool.query(`
-    SELECT cf.id, cf.kind, cf.filename, cf.mimetype, cf.uploaded_at, cf.review_status, u.email AS carrier_email
-    FROM carrier_files cf
-    JOIN users u ON u.id = cf.carrier_id
-    ${cfSqlWhere}
-    ORDER BY cf.uploaded_at DESC
-    LIMIT 300
-  `, params);
-
-  // reset params for second query to avoid index mismatch; easiest: rerun building
-  const params2 = [];
-  const push2 = (v) => { params2.push(v); return `$${params2.length}`; };
-  const lfWhere2 = [];
-  if (fileName) lfWhere2.push(`lower(lf.filename) LIKE ${push2(`%${fileName}%`)}`);
-  if (uploadedBy) lfWhere2.push(`lower(uu.email) LIKE ${push2(`%${uploadedBy}%`)}`);
-  if (loadId) lfWhere2.push(`lf.load_id = ${push2(Number(loadId))}`);
-  if (q) lfWhere2.push(`(lower(l.lane_from) LIKE ${push2(`%${q}%`)} OR lower(l.lane_to) LIKE ${push2(`%${q}%`)} OR lower(lf.kind) LIKE ${push2(`%${q}%`)})`);
-  const lfSqlWhere2 = lfWhere2.length ? `WHERE ${lfWhere2.join(" AND ")}` : "";
-
-  const loadFiles = await pool.query(`
-    SELECT lf.id, lf.load_id, lf.kind, lf.filename, lf.mimetype, lf.uploaded_at, lf.review_status,
-           uu.email AS uploaded_by, l.lane_from, l.lane_to
-    FROM load_files lf
-    JOIN users uu ON uu.id = lf.uploaded_by_user_id
-    JOIN loads l ON l.id = lf.load_id
-    ${lfSqlWhere2}
-    ORDER BY lf.uploaded_at DESC
-    LIMIT 300
-  `, params2);
-
-  const body = `
-    <div class="section">
-      <div class="spread">
-        <div>
-          <h2 style="margin:0">Admin • Documents</h2>
-          <div class="muted" style="margin-top:8px">Review and approve/reject carrier and load documents.</div>
-        </div>
-        <a class="btn btnGhost" href="/dashboard">Back</a>
-      </div>
-
-      <div class="divider"></div>
-
-      <form method="GET" action="/admin/documents" class="formGrid">
-        <div class="threeCol">
-          <input name="q" placeholder="Search lane / carrier email / kind" value="${escapeHtml(req.query.q || "")}"/>
-          <input name="filename" placeholder="Filename contains" value="${escapeHtml(req.query.filename || "")}"/>
-          <input name="load" placeholder="Load #" value="${escapeHtml(req.query.load || "")}"/>
-        </div>
-        <div class="twoCol">
-          <input name="uploaded_by" placeholder="Uploaded-by (email)" value="${escapeHtml(req.query.uploaded_by || "")}"/>
-          <button class="btn btnPrimary" type="submit">Search</button>
-        </div>
-      </form>
-
-      <div class="divider"></div>
-
-      <h3 style="margin:0">Carrier documents</h3>
-      <div class="small">W‑9 • COI • Authority (stored in DFX)</div>
-      <div class="divider"></div>
-
-      ${carrierFiles.rows.length ? carrierFiles.rows.map(f => `
-        <div class="loadCard">
-          <div class="loadTop">
-            <div>
-              <div class="lane">${escapeHtml(f.carrier_email)} • ${escapeHtml(f.kind)} • ${escapeHtml(f.filename)}</div>
-              <div class="muted">Status: ${escapeHtml(f.review_status || "PENDING")} • Uploaded: ${escapeHtml(new Date(f.uploaded_at).toISOString())}</div>
-            </div>
-            <div style="display:flex;gap:10px;flex-wrap:wrap">
-              <a class="btn btnGhost" target="_blank" href="/admin/carrier-files/${f.id}/view">View</a>
-              <form method="POST" action="/admin/carrier-files/${f.id}/approve"><button class="btn btnPrimary" type="submit">Approve</button></form>
-              <form method="POST" action="/admin/carrier-files/${f.id}/reject"><button class="btn btnGhost" type="submit">Reject</button></form>
-            </div>
-          </div>
-        </div>
-      `).join("") : `<div class="muted">No carrier documents match your search.</div>`}
-
-      <div class="divider"></div>
-      <h3 style="margin:0">Load documents</h3>
-      <div class="small">BOL / POD / invoices (stored in DFX)</div>
-      <div class="divider"></div>
-
-      ${loadFiles.rows.length ? loadFiles.rows.map(f => `
-        <div class="loadCard">
-          <div class="loadTop">
-            <div>
-              <div class="lane">Load #${f.load_id} ${escapeHtml(f.lane_from)} → ${escapeHtml(f.lane_to)} • ${escapeHtml(f.kind)} • ${escapeHtml(f.filename)}</div>
-              <div class="muted">Uploaded by: ${escapeHtml(f.uploaded_by)} • Status: ${escapeHtml(f.review_status || "PENDING")} • Uploaded: ${escapeHtml(new Date(f.uploaded_at).toISOString())}</div>
-            </div>
-            <div style="display:flex;gap:10px;flex-wrap:wrap">
-              <a class="btn btnGhost" target="_blank" href="/admin/load-files/${f.id}/view">View</a>
-              <form method="POST" action="/admin/load-files/${f.id}/approve"><button class="btn btnPrimary" type="submit">Approve</button></form>
-              <form method="POST" action="/admin/load-files/${f.id}/reject"><button class="btn btnGhost" type="submit">Reject</button></form>
-            </div>
-          </div>
-        </div>
-      `).join("") : `<div class="muted">No load documents match your search.</div>`}
-    </div>
-  `;
-
-  res.send(layout({ title: "Admin Documents", user, body }));
-});
-
-app.get("/admin/audit", requireAuth, requireRole("ADMIN"), async (req, res) => {
-  const user = req.user;
-  const rows = await pool.query(`
-    SELECT da.*, u.email AS actor_email
-    FROM document_audit da
-    LEFT JOIN users u ON u.id = da.actor_user_id
-    ORDER BY da.created_at DESC
-    LIMIT 400
-  `);
-
-  const body = `
-    <div class="section">
-      <div class="spread">
-        <div>
-          <h2 style="margin:0">Admin • Document Audit</h2>
-          <div class="muted" style="margin-top:8px">Who uploaded/viewed/approved which documents.</div>
-        </div>
-        <a class="btn btnGhost" href="/dashboard">Back</a>
-      </div>
-
-      <div class="divider"></div>
-
-      ${rows.rows.length ? rows.rows.map(a => `
-        <div class="loadCard">
-          <div class="lane">${escapeHtml(a.action)} • ${escapeHtml(a.entity)} #${escapeHtml(a.entity_id)}</div>
-          <div class="small">Actor: ${escapeHtml(a.actor_email || "—")} • ${escapeHtml(new Date(a.created_at).toISOString())}</div>
-          <div class="small mono">${escapeHtml(a.ip || "")}</div>
-        </div>
-      `).join("") : `<div class="muted">No audit records yet.</div>`}
-    </div>
-  `;
-  res.send(layout({ title: "Audit", user, body }));
-});
-
-async function setDocReview({ table, id, status, adminId, req }) {
-  const r = await pool.query(
-    `UPDATE ${table} SET review_status=$1, reviewed_by_admin_id=$2, reviewed_at=NOW() WHERE id=$3 RETURNING id`,
-    [status, adminId, id]
+/* --------------------- ADMIN: DOCUMENT APPROVAL --------------------- */
+app.post("/admin/docs/carrier/:id/:kind/approve", requireAuth, requireRole("ADMIN"), async (req, res) => {
+  const carrierId = Number(req.params.id);
+  const kind = String(req.params.kind || "").toUpperCase();
+  if (!["W9", "COI", "AUTHORITY"].includes(kind)) return res.status(400).send("Invalid kind.");
+  await pool.query(
+    `UPDATE carrier_files SET status='APPROVED', reviewed_by_admin_id=$1, reviewed_at=NOW(), admin_note=NULL WHERE carrier_id=$2 AND kind=$3`,
+    [req.user.id, carrierId, kind]
   );
-  return r.rows[0]?.id || null;
-}
-
-app.get("/admin/carrier-files/:id/view", requireAuth, requireRole("ADMIN"), async (req, res) => {
-  const id = Number(req.params.id);
-  const r = await pool.query(`SELECT filename, mimetype, bytes FROM carrier_files WHERE id=$1`, [id]);
-  const f = r.rows[0];
-  if (!f) return res.status(404).send("File not found.");
-  await logDocAudit({ entity: "CARRIER_FILE", entityId: id, action: "VIEW", actorUserId: req.user.id, req });
-  res.setHeader("Content-Type", f.mimetype || "application/octet-stream");
-  res.setHeader("Content-Disposition", `inline; filename="${f.filename.replaceAll('"', "")}"`);
-  res.send(f.bytes);
+  await logDocAudit(req, { userId: req.user.id, action: "APPROVE", docType: "CARRIER_FILE", docId: carrierId, meta: kind });
+  res.redirect("/documents?tab=carriers");
 });
 
-app.get("/admin/load-files/:id/view", requireAuth, requireRole("ADMIN"), async (req, res) => {
-  const id = Number(req.params.id);
-  const r = await pool.query(`SELECT filename, mimetype, bytes FROM load_files WHERE id=$1`, [id]);
-  const f = r.rows[0];
-  if (!f) return res.status(404).send("File not found.");
-  await logDocAudit({ entity: "LOAD_FILE", entityId: id, action: "VIEW", actorUserId: req.user.id, req });
-  res.setHeader("Content-Type", f.mimetype || "application/octet-stream");
-  res.setHeader("Content-Disposition", `inline; filename="${f.filename.replaceAll('"', "")}"`);
-  res.send(f.bytes);
+app.post("/admin/docs/carrier/:id/:kind/reject", requireAuth, requireRole("ADMIN"), async (req, res) => {
+  const carrierId = Number(req.params.id);
+  const kind = String(req.params.kind || "").toUpperCase();
+  const note = clampStr(req.body.note || "Rejected", 240);
+  if (!["W9", "COI", "AUTHORITY"].includes(kind)) return res.status(400).send("Invalid kind.");
+  await pool.query(
+    `UPDATE carrier_files SET status='REJECTED', reviewed_by_admin_id=$1, reviewed_at=NOW(), admin_note=$2 WHERE carrier_id=$3 AND kind=$4`,
+    [req.user.id, note, carrierId, kind]
+  );
+  await logDocAudit(req, { userId: req.user.id, action: "REJECT", docType: "CARRIER_FILE", docId: carrierId, meta: kind + ": " + note });
+  res.redirect("/documents?tab=carriers");
 });
 
-app.post("/admin/carrier-files/:id/approve", requireAuth, requireRole("ADMIN"), async (req, res) => {
+app.post("/admin/docs/load-file/:id/approve", requireAuth, requireRole("ADMIN"), async (req, res) => {
   const id = Number(req.params.id);
-  const ok = await setDocReview({ table: "carrier_files", id, status: "APPROVED", adminId: req.user.id, req });
-  if (ok) await logDocAudit({ entity: "CARRIER_FILE", entityId: id, action: "APPROVE", actorUserId: req.user.id, req });
-  res.redirect("/admin/documents");
-});
-app.post("/admin/carrier-files/:id/reject", requireAuth, requireRole("ADMIN"), async (req, res) => {
-  const id = Number(req.params.id);
-  const ok = await setDocReview({ table: "carrier_files", id, status: "REJECTED", adminId: req.user.id, req });
-  if (ok) await logDocAudit({ entity: "CARRIER_FILE", entityId: id, action: "REJECT", actorUserId: req.user.id, req });
-  res.redirect("/admin/documents");
+  await pool.query(
+    `UPDATE load_files SET status='APPROVED', reviewed_by_admin_id=$1, reviewed_at=NOW(), admin_note=NULL WHERE id=$2`,
+    [req.user.id, id]
+  );
+  await logDocAudit(req, { userId: req.user.id, action: "APPROVE", docType: "LOAD_FILE", docId: id, meta: "" });
+  res.redirect("/documents?tab=loads");
 });
 
-app.post("/admin/load-files/:id/approve", requireAuth, requireRole("ADMIN"), async (req, res) => {
+app.post("/admin/docs/load-file/:id/reject", requireAuth, requireRole("ADMIN"), async (req, res) => {
   const id = Number(req.params.id);
-  const ok = await setDocReview({ table: "load_files", id, status: "APPROVED", adminId: req.user.id, req });
-  if (ok) await logDocAudit({ entity: "LOAD_FILE", entityId: id, action: "APPROVE", actorUserId: req.user.id, req });
-  res.redirect("/admin/documents");
-});
-app.post("/admin/load-files/:id/reject", requireAuth, requireRole("ADMIN"), async (req, res) => {
-  const id = Number(req.params.id);
-  const ok = await setDocReview({ table: "load_files", id, status: "REJECTED", adminId: req.user.id, req });
-  if (ok) await logDocAudit({ entity: "LOAD_FILE", entityId: id, action: "REJECT", actorUserId: req.user.id, req });
-  res.redirect("/admin/documents");
+  const note = clampStr(req.body.note || "Rejected", 240);
+  await pool.query(
+    `UPDATE load_files SET status='REJECTED', reviewed_by_admin_id=$1, reviewed_at=NOW(), admin_note=$2 WHERE id=$3`,
+    [req.user.id, note, id]
+  );
+  await logDocAudit(req, { userId: req.user.id, action: "REJECT", docType: "LOAD_FILE", docId: id, meta: note });
+  res.redirect("/documents?tab=loads");
 });
 
 /* --------------------- LOAD BOARD (API + PAGE) --------------------- */
@@ -3362,20 +3463,15 @@ app.post("/carrier/loads/:id/bol", requireAuth, requireRole("CARRIER"), upload.s
   if (l.status !== "BOOKED") return res.status(400).send("BOL upload allowed after booking.");
   if (Number(l.booked_carrier_id) !== Number(req.user.id)) return res.status(403).send("Not your booked load.");
 
-  const ins = await pool.query(
-    `INSERT INTO load_files (load_id, uploaded_by_user_id, kind, filename, mimetype, bytes)
-     VALUES ($1,$2,'BOL',$3,$4,$5)
-     RETURNING id`,
+  await pool.query(
+    `INSERT INTO load_files (load_id, uploaded_by_user_id, kind, filename, mimetype, bytes, status)
+     VALUES ($1,$2,'BOL',$3,$4,$5,'PENDING')`,
     [loadId, req.user.id, file.originalname, file.mimetype || "application/octet-stream", file.buffer]
   );
 
+  await logDocAudit(req, { userId: req.user.id, action: "UPLOAD", docType: "LOAD_FILE", docId: loadId, meta: "BOL" });
 
-const fileId = ins.rows[0]?.id;
-if (fileId) {
-  await logDocAudit({ entity: "LOAD_FILE", entityId: fileId, action: "UPLOAD", actorUserId: req.user.id, req });
-}
-
-res.redirect("/dashboard");
+  res.redirect("/dashboard");
 });
 
 /* --------------------- SHIPPER PLANS + STRIPE --------------------- */
